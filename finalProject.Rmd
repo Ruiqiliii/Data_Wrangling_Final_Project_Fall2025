@@ -1,0 +1,183 @@
+---
+title: "FinalProject"
+author: "XinyiYu"
+date: "2025-10-16"
+output: html_document
+---
+packages
+```{r}
+library(readxl)
+library(dplyr)
+library(readr)
+library(stringr)
+```
+
+
+CDC Pregnancy Vaccination
+```{r}
+#巧思：用了Use Webscraping or an API for Data Collection
+vacc_url <- "https://data.cdc.gov/api/views/h7pm-wmjc/rows.csv?accessType=DOWNLOAD"
+vacc_df <- read.csv(vacc_url)
+
+# 有几个干扰统一为NY
+vacc_df$Geography <- gsub("NY-City of New York", "New York", vacc_df$Geography)
+vacc_df$Geography <- gsub("NY-Rest of state", "New York", vacc_df$Geography)
+
+# 过滤掉others
+vacc_df <- vacc_df %>%
+  filter(!(Geography %in% c("United States", "Puerto Rico", "Commonwealth of the Northern Mariana Islands")))
+
+#州名转缩写
+state_abbrev <- c(
+  'Alabama' = 'AL', 'Alaska' = 'AK', 'Arizona' = 'AZ', 'Arkansas' = 'AR',
+  'California' = 'CA', 'Colorado' = 'CO', 'Connecticut' = 'CT', 'Delaware' = 'DE',
+  'District of Columbia' = 'DC', 'Florida' = 'FL', 'Georgia' = 'GA', 'Hawaii' = 'HI',
+  'Idaho' = 'ID', 'Illinois' = 'IL', 'Indiana' = 'IN', 'Iowa' = 'IA', 'Kansas' = 'KS',
+  'Kentucky' = 'KY', 'Louisiana' = 'LA', 'Maine' = 'ME', 'Maryland' = 'MD',
+  'Massachusetts' = 'MA', 'Michigan' = 'MI', 'Minnesota' = 'MN',
+  'Mississippi' = 'MS', 'Missouri' = 'MO', 'Montana' = 'MT', 'Nebraska' = 'NE',
+  'Nevada' = 'NV', 'New Hampshire' = 'NH', 'New Jersey' = 'NJ',
+  'New Mexico' = 'NM', 'New York' = 'NY', 'North Carolina' = 'NC',
+  'North Dakota' = 'ND', 'Ohio' = 'OH', 'Oklahoma' = 'OK', 'Oregon' = 'OR',
+  'Pennsylvania' = 'PA', 'Rhode Island' = 'RI', 'South Carolina' = 'SC',
+  'South Dakota' = 'SD', 'Tennessee' = 'TN', 'Texas' = 'TX', 'Utah' = 'UT',
+  'Vermont' = 'VT', 'Virginia' = 'VA', 'Washington' = 'WA',
+  'West Virginia' = 'WV', 'Wisconsin' = 'WI', 'Wyoming' = 'WY'
+)
+
+# 添加州缩写列
+vacc_df <- vacc_df %>%
+  mutate(State = state_abbrev[Geography])
+write_csv(vacc_df, "vaccination.csv")
+head(vacc_df)
+```
+
+
+Urban-Rural Processing
+```{r}
+# 下载Urban-Rural
+url <- "https://www.cdc.gov/nchs/data/data-analysis/NCHSurb-rural-codes.csv"
+download.file(url, destfile = "urban_rural.xlsx", mode = "wb")
+urban_rural <- read_csv("/Users/yuxinyi/Dartmouth/data wrangling/finalProject/urban_rural.csv")
+
+#去除NA
+urban_rural <- urban_rural %>%
+  select(ST_ABBREV, CTYPOP, CODE2013, CODE2023) %>%
+  filter(!is.na(CTYPOP), !is.na(CODE2013), !is.na(CODE2023))
+
+# 计算州总人口
+state_pop <- urban_rural %>%
+  group_by(ST_ABBREV) %>%
+  summarise(STATEPOP = sum(CTYPOP, na.rm = TRUE))
+
+# 合并人口总数、计算权重
+urban_rural <- urban_rural %>%
+  left_join(state_pop, by = "ST_ABBREV") %>%
+  mutate(WEIGHT = CTYPOP / STATEPOP,
+         INDEX2013 = CODE2013 * WEIGHT,
+         INDEX2023 = CODE2023 * WEIGHT)
+
+# 计算加权城乡指数 & 2013，2023变化
+urban_result <- urban_rural %>%
+  group_by(ST_ABBREV) %>%
+  summarise(INDEX2013 = sum(INDEX2013),
+            INDEX2023 = sum(INDEX2023)) %>%
+  mutate(CHANGE = INDEX2023 - INDEX2013) %>%
+  arrange(desc(CHANGE))
+head(urban_result)
+
+write.csv(urban_result, "state_urban_index_2013_2023.csv", row.names = FALSE)
+
+```
+
+insurance coverage
+```{r}
+folder <- "/Users/yuxinyi/Dartmouth/data wrangling"
+years <- setdiff(2012:2022, 2020)  # 跳过2020年
+
+# 州名对应简写
+state_abbrev <- c(
+  'Alabama' = 'AL', 'Alaska' = 'AK', 'Arizona' = 'AZ', 'Arkansas' = 'AR',
+  'California' = 'CA', 'Colorado' = 'CO', 'Connecticut' = 'CT', 'Delaware' = 'DE',
+  'District of Columbia' = 'DC', 'Florida' = 'FL', 'Georgia' = 'GA', 'Hawaii' = 'HI',
+  'Idaho' = 'ID', 'Illinois' = 'IL', 'Indiana' = 'IN', 'Iowa' = 'IA', 'Kansas' = 'KS',
+  'Kentucky' = 'KY', 'Louisiana' = 'LA', 'Maine' = 'ME', 'Maryland' = 'MD',
+  'Massachusetts' = 'MA', 'Michigan' = 'MI', 'Minnesota' = 'MN',
+  'Mississippi' = 'MS', 'Missouri' = 'MO', 'Montana' = 'MT', 'Nebraska' = 'NE',
+  'Nevada' = 'NV', 'New Hampshire' = 'NH', 'New Jersey' = 'NJ',
+  'New Mexico' = 'NM', 'New York' = 'NY', 'North Carolina' = 'NC',
+  'North Dakota' = 'ND', 'Ohio' = 'OH', 'Oklahoma' = 'OK', 'Oregon' = 'OR',
+  'Pennsylvania' = 'PA', 'Rhode Island' = 'RI', 'South Carolina' = 'SC',
+  'South Dakota' = 'SD', 'Tennessee' = 'TN', 'Texas' = 'TX', 'Utah' = 'UT',
+  'Vermont' = 'VT', 'Virginia' = 'VA', 'Washington' = 'WA',
+  'West Virginia' = 'WV', 'Wisconsin' = 'WI', 'Wyoming' = 'WY'
+)
+#初始化空list
+all_data <- list()
+
+# 循环一口气读取所有年份数据
+for (year in years) {
+  file_path <- file.path(folder, paste0("raw_data", year, ".csv"))
+  
+  try({
+    # 用col_types显式指定格式，跳过Footnotes和Total两列（用不到）
+    df <- read_csv(
+      file_path,
+      skip = 2,
+      col_types = cols(
+        Location = col_character(),
+        Employer = col_double(),
+        `Non-Group` = col_double(),
+        Medicaid = col_double(),
+        Medicare = col_double(),
+        Military = col_double(),
+        Uninsured = col_double(),
+        Total = col_skip(),
+        Footnotes = col_skip()
+      )
+    )
+    
+    # 只保留州级行，去掉united state那一行
+    df <- df %>%
+      filter(Location %in% names(state_abbrev))
+    
+    #添加年份和州缩写
+    df <- df %>%
+      mutate(
+        Year = year,
+        State = state_abbrev[Location],
+        Insured = Employer + `Non-Group` + Medicaid + Medicare + Military
+      ) %>%
+      select(Year, State, Insured, Uninsured)
+
+    # 汇总
+    all_data[[as.character(year)]] <- df
+    message("Processed ", year, " with ", nrow(df), " rows")
+    
+  }, silent = TRUE)
+}
+
+# 合并
+insurance <- bind_rows(all_data)
+
+write_csv(insurance, "insurance_summary_by_state_2012_2022.csv")
+head(insurance)
+```
+
+merge
+```{r}
+#urban_rural只保留2023,urban_merge是用来merge的版本，没有另存为csv
+urban_merge <- urban_result %>%
+  select(ST_ABBREV, INDEX2023) %>%
+  rename(State = ST_ABBREV,
+         UrbanicityIndex = INDEX2023)
+#merge
+merged_df <- vacc_df %>%
+  mutate(Year = as.numeric(`Survey.Year.Influenza.Season`)) %>%
+  left_join(insurance, by = c("State", "Year")) %>%
+  left_join(urban_merge, by = "State")
+head(merged_df)
+write_csv(merged_df, "MergedVersion.csv")
+```
+
+
