@@ -1,14 +1,14 @@
 ---
-title: "Aim 2.2 & 2.3 — Urbanicity, Uninsurance, and Maternal Vaccination (Updated)"
+title: "Aim 2.2 & 2.3 — Urbanicity, Uninsurance, and Maternal Vaccination"
 author: "Ruiqi Li"
 date: "`r format(Sys.Date())`"
 output:
-  pdf_document:
-    toc: true
-    number_sections: true
   html_document:
     toc: true
     toc_depth: 3
+    number_sections: true
+  pdf_document:
+    toc: true
     number_sections: true
 ---
 
@@ -534,20 +534,26 @@ ggplot(heat_flu_b, aes(x = nchs_bin, y = unins_bin, fill = pred)) +
   scale_fill_gradient(low = "#f7fbff", high = "#08306b",
                       name = "Predicted coverage (%)") +
   labs(x="NCHS (1=urban → 6=rural)", y="Uninsurance (binned)",
-       title="Predicted Flu coverage — binned heatmap") +
+       title="Predicted Flu coverage heatmap") +
   coord_equal() +
   scale_fill_viridis_c(option = "magma", direction = -1, name = "Predicted (%)") +
-  theme_minimal()
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1, vjust = 1)
+)
 
 ggplot(heat_tdap_b, aes(x = nchs_bin, y = unins_bin, fill = pred)) +
   geom_tile(color = "white", size = 0.6) +
   scale_fill_gradient(low = "#f7fbff", high = "#08306b",
                       name = "Predicted coverage (%)") +
   labs(x="NCHS (1=urban → 6=rural)", y="Uninsurance (binned)",
-       title="Predicted Tdap coverage — binned heatmap") +
+       title="Predicted Tdap coverage heatmap") +
   coord_equal() +
   scale_fill_viridis_c(option = "magma", direction = -1, name = "Predicted (%)") +
-  theme_minimal()
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1, vjust = 1)
+)
 ```
 
 ## 6D) Error bar graph of interactive "marginal effects" 
