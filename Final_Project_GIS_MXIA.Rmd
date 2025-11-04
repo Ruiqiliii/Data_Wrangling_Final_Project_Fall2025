@@ -1,0 +1,1585 @@
+---
+title: "Final_Project_GIS_MXIA"
+author: "Mengying Xia"
+date: "2025-10-23"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(sf)
+library(tigris)
+library(tmap)
+library(viridis)
+library(ggplot2)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggpubr)
+library(cowplot)
+options(tigris_use_cache = TRUE)
+```
+
+## 1. Data management for merged version dataset
+
+```{r}
+vac <- read.csv("MergedVersion.csv")
+colnames(vac) <- c("Vaccine", "Geography_Type", "State_full","Survey_Year", "Adjustment", "Value", "Estimate", "CI", "Sample_Size", "State", "Year", "Insured", "Uninsured", "UrbanicityIndex")
+
+vac <- vac %>%
+  mutate(State = toupper(State)) %>%
+  mutate(
+    across(c(Vaccine, Geography_Type, State_full, Survey_Year, Year, Adjustment, Value, State), as.factor),
+    across(CI, as.character),
+    across(c(Estimate, Sample_Size, Insured, Uninsured, UrbanicityIndex),
+           ~ as.numeric(gsub("[^0-9.]", "", .)))
+  )
+
+# check missing pattern
+dim(vac)
+colSums(is.na(vac))
+summary(vac)
+
+# check age group, missing estimates, and sample size
+age_missing_keys <- vac %>%
+  filter(Adjustment == "Age" & (is.na(Estimate) | is.na(Sample_Size))) %>%
+  distinct(State_full, Vaccine, Year)
+# check those same combinations for Race and Ethnicity
+race_check <- vac %>%
+  filter(Adjustment == "Race and Ethnicity")%>%
+  semi_join(age_missing_keys, by = c("State_full", "Vaccine", "Year")) %>%
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    total = n(),
+    missing_estimate = sum(is.na(Estimate)),
+    missing_sample_size = sum(is.na(Sample_Size)),
+    all_complete = all(!is.na(Estimate) & !is.na(Sample_Size))
+  ) %>%
+  ungroup()
+race_check[race_check$all_complete==TRUE,]
+
+# use age group to recalcute the estimates for year and 
+vac_filtered <- vac %>%
+  filter(Adjustment == "Age") %>%
+  anti_join(age_missing_keys, by = c("State_full", "Vaccine", "Year")) 
+
+# check missingness
+vac_filtered %>%
+  filter(Adjustment == "Age" & (is.na(Estimate) | is.na(Sample_Size))) %>%
+  distinct(State_full, Vaccine, Year)
+
+# check consistency for insured, uninsured, and urbanicity
+vac_filtered %>%
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    n_rows = n(),
+    insured_var = n_distinct(Insured, na.rm = TRUE),
+    uninsured_var = n_distinct(Uninsured, na.rm = TRUE),
+    urbanicity_var = n_distinct(UrbanicityIndex, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  summarise(
+    groups_total = n(),
+    groups_insured_vary = sum(insured_var > 1),
+    groups_uninsured_vary = sum(uninsured_var > 1),
+    groups_urbanicity_vary = sum(urbanicity_var > 1)
+  )
+
+df <- vac_filtered %>% 
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    Weighted_Estimate = sum(Estimate * Sample_Size) / 
+                        (100*sum(Sample_Size)),
+    Total_Sample = sum(Sample_Size),
+    State = first(State),
+    Insured = first(Insured),
+    Uninsured = first(Uninsured),
+    UrbanicityIndex = first(UrbanicityIndex)
+  ) %>%
+  ungroup()
+
+# exclude all missingness
+colSums(is.na(df))
+df <- df %>% filter(complete.cases(.))
+dim(df)
+
+df <- df %>% 
+  mutate(State = toupper(State)) %>% 
+  mutate(insurance_coverage = Insured/(Insured+Uninsured)) 
+
+head(df)
+```
+## 2. Prepare mapping data
+```{r}
+# get U.S. state boundaries (excluding territories) 
+states_sf <- tigris::states(cb = TRUE, year = 2024) %>%
+filter(!STUSPS %in% c("AS", "GU", "MP", "PR", "VI")) %>%
+tigris::shift_geometry() %>% # <- does the AK/HI inset placement
+select(STUSPS, NAME, geometry) %>%
+st_transform(2163)
+
+# join vaccination + insurance data
+merged_df <- states_sf %>%
+  left_join(df, by = c("STUSPS" = "State"))
+# check unmatched states
+unmatched <- merged_df %>% filter(is.na(Vaccine))
+if (nrow(unmatched) > 0) {
+  cat("Warning: Some states did not match:\n")
+  print(unmatched$NAME)
+}
+
+# save as GeoJSON for future use
+st_write(merged_df, "pregnant_vaccination.geojson", driver = "GeoJSON", delete_dsn = TRUE)
+
+# read merged vaccination data
+map_data <- st_read("pregnant_vaccination.geojson", quiet = TRUE)
+
+# cut at the quantile for two vac coverage
+quantile(map_data %>% filter(Vaccine == "Influenza") %>% pull(Weighted_Estimate), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(Weighted_Estimate), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+
+quantile(map_data %>% filter(Vaccine == "Influenza") %>% pull(insurance_coverage), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(insurance_coverage), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+
+map_all <- map_data %>%
+  mutate(
+    Estimate_bin = case_when(
+      Vaccine == "Influenza" & !is.na(Weighted_Estimate) ~ as.character(cut(
+        Weighted_Estimate,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Influenza", !is.na(Weighted_Estimate)) %>%
+            pull(Weighted_Estimate),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%"),
+        include.lowest = TRUE
+      )),
+      
+      Vaccine == "Tdap" & !is.na(Weighted_Estimate) ~ as.character(cut(
+        Weighted_Estimate,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Tdap", !is.na(Weighted_Estimate)) %>%
+            pull(Weighted_Estimate),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%"),
+        include.lowest = TRUE
+      )),
+      
+      TRUE ~ NA_character_
+    ),
+    
+    Insurance_bin = case_when(
+      Vaccine == "Influenza" & !is.na(insurance_coverage) ~ as.character(cut(
+        insurance_coverage,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Influenza", !is.na(insurance_coverage)) %>%
+            pull(insurance_coverage),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<74%", "74–86%", "86–89%", "89–91%", ">91%"),
+        include.lowest = TRUE
+      )),
+      
+      Vaccine == "Tdap" & !is.na(insurance_coverage) ~ as.character(cut(
+        insurance_coverage,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Tdap", !is.na(insurance_coverage)) %>%
+            pull(insurance_coverage),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<87%", "87–90%", "90–92%", "92–94%", ">94%"),
+        include.lowest = TRUE
+      )),
+      
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+## 3. Fix reference system
+```{r}
+# 1) One point per state for labeling
+state_pts <- map_all |>
+  st_point_on_surface() |>
+  mutate(
+    cx = st_coordinates(geometry)[,1],
+    cy = st_coordinates(geometry)[,2]
+  )
+
+# 2) States that need leader lines (you can tweak this list)
+small_states <- c("CT","RI","DC","DE","MD","MA","VT","NH")
+
+# 3) Offsets (meters; CRS 2163) for those small states
+line_len <- 300000
+label_gap <- 35000
+target_len <- 600000
+
+offsets <- tibble::tribble(
+  ~STUSPS, ~dx, ~dy, ~len, ~gap,
+  "CT", 8e4, -1e4, 300000, 30000,
+  "RI", 9e4, 2.2e4, 180000, 45000,
+  "DC", 11e4, -6e4, 280000, 45000,
+  "DE", 9e4, -2e4, 250000, 45000,
+  "MD", 19e4, -5e4, 550000, 45000,
+  "MA", 8e4, 4e4, 280000, 45000,
+  "VT", -8e4, 4e4, 280000, 45000,
+  "NH", -7e4, 6e4, 380000, 45000
+)
+
+labels_small <- state_pts |>
+  dplyr::filter(STUSPS %in% small_states) |>
+  left_join(offsets, by = "STUSPS") |>
+  mutate(
+    vlen = sqrt(dx^2 + dy^2),
+    ux = dx / vlen,
+    uy = dy / vlen,
+    xend = cx + ux * line_len, 
+    yend = cy + uy * line_len,
+    xlab = cx + ux * (line_len + label_gap), 
+    ylab = cy + uy * (line_len + label_gap)
+  ) |>
+  select(-vlen, -ux, -uy)
+
+labels_large <- state_pts |>
+  dplyr::filter(!STUSPS %in% small_states)
+```
+Aim 1: Visualization of the Geographic Patterns of Urbanicity, Women’s Insurance Coverage, and Vaccination Coverage Among Pregnant Women Across the States by Mapping
+
+● 1.1 Identify areas with low vaccination coverage among pregnant women and assess whether these areas are more likely to cluster in states with lower insurance coverage (flu and Tdap) and/or lower urbanicity.
+
+# Definitions for Urbanicity Index
+**Metropolitan counties**
+1. Large central metro counties in metropolitan areas of 1 million population or more that contain the entire population of the largest principal city of the metropolitan area, or are entirely contained in the largest principal city of the metropolitan area, or contain at least 250,000 residents of any principal city in the metropolitan area
+2. Large fringe metro counties in metropolitan areas of 1 million or more population that do not qualify as large central
+3. Medium metro counties in metropolitan areas of 250,000 to 999,999 population
+4. Small metro counties in metropolitan areas of 50,000 to 249,999 population
+**Nonmetropolitan counties**
+5. Micropolitan counties in micropolitan statistical areas
+6. Noncore counties that did not qualify as micropolitan
+
+Reference: 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC10986217/
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8755627/#S7
+```{r}
+# prepare data sets
+dat <- map_all %>%
+st_drop_geometry() 
+
+map_flu_2013 <- states_sf %>%
+left_join(
+  dat %>%
+  filter(Year == 2013, Vaccine == "Influenza") %>% 
+    mutate(Estimate_bin = as.factor(Estimate_bin),
+           Insurance_bin = as.factor(Insurance_bin)), 
+  by = c("STUSPS" = "STUSPS"))
+
+centroids_flu_2013 <- st_centroid(map_flu_2013)
+centroids_df_flu_2013 <- cbind(
+  st_coordinates(centroids_flu_2013),
+  st_drop_geometry(map_flu_2013)
+)
+
+
+map_flu_2022 <- states_sf %>%
+left_join(
+  dat %>%
+  filter(Year == 2022, Vaccine == "Influenza") %>% 
+    mutate(Estimate_bin = as.factor(Estimate_bin),
+           Insurance_bin = as.factor(Insurance_bin)), 
+  by = c("STUSPS" = "STUSPS"))
+
+centroids_flu_2022 <- st_centroid(map_flu_2022)
+centroids_df_flu_2022 <- cbind(
+  st_coordinates(centroids_flu_2022),
+  st_drop_geometry(map_flu_2022)
+)
+
+
+
+map_tdap_2013 <- states_sf %>%
+left_join(
+  dat %>%
+  filter(Year == 2013, Vaccine == "Tdap") %>% 
+    mutate(Estimate_bin = as.factor(Estimate_bin),
+           Insurance_bin = as.factor(Insurance_bin)), 
+  by = c("STUSPS" = "STUSPS"))
+
+centroids_tdap_2013 <- st_centroid(map_tdap_2013)
+centroids_df_tdap_2013 <- cbind(
+  st_coordinates(centroids_tdap_2013),
+  st_drop_geometry(map_tdap_2013)
+)
+
+
+map_tdap_2022 <- states_sf %>%
+left_join(
+  dat %>%
+  filter(Year == 2022, Vaccine == "Tdap") %>% 
+    mutate(Estimate_bin = as.factor(Estimate_bin),
+           Insurance_bin = as.factor(Insurance_bin)), 
+  by = c("STUSPS" = "STUSPS"))
+
+centroids_tdap_2022 <- st_centroid(map_tdap_2022)
+centroids_df_tdap_2022 <- cbind(
+  st_coordinates(centroids_tdap_2022),
+  st_drop_geometry(map_tdap_2022)
+)
+
+```
+
+1.1.1 influenza in 2013 + urbanicity
+```{r}
+bb <- sf::st_bbox(map_flu_2013)
+
+ggplot() +
+  # states
+  geom_sf(data = map_flu_2013,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+  # centroids: smaller index => larger size  (use reverse transform)
+geom_point(
+  data = centroids_df_flu_2013,
+  aes(
+    x = X, y = Y,
+    size = UrbanicityIndex
+  ),
+  color = "#045a8d",   
+  fill  = "#67a9cf",   
+  shape = 21,
+  alpha = 0.8
+) +
+scale_size_continuous(
+  trans = "reverse",             
+  range = c(1, 20),  
+  limits = c(1, 5),                 
+  breaks = c(2, 3, 4),  
+  name = "Urbanicity Index\n(smaller = more urban)"
+)+
+  # fill scale
+  scale_fill_manual(
+    name   = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    drop = FALSE,
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Influenza Vaccination and Urbanicity by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Red circles: urbanicity index"
+  )
+```
+1.1.2 influenza in 2013 + insurance
+```{r}
+ggplot() +
+  # states
+geom_sf(data = map_flu_2013,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+ggnewscale::new_scale_fill() +
+geom_point(
+    data = centroids_df_flu_2013|> dplyr::filter(!is.na(insurance_coverage)),
+    aes(x = X, y = Y, fill = insurance_coverage*100),
+    shape = 21, size = 12, alpha = 0.8
+  ) +
+scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#eff3ff",  high = "#2171b5",
+    breaks = seq(70, 100, by = 5), 
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +  
+
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Influenza Vaccination and Insurance Rate by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Circles: insurance rate"
+  )
+```
+1.1.3 influenza in 2013 + both
+```{r}
+p_flu_both_2013 <- ggplot() +
+  # --- States: vaccination rate ---
+  geom_sf(
+    data = map_flu_2013,
+    aes(fill = Estimate_bin),
+    color = "gray40", size = 0.3
+  ) +
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  ggnewscale::new_scale_fill() +
+
+  # --- Circles: insurance rate (color) + urbanicity (size) ---
+  geom_point(
+    data = centroids_df_flu_2013 %>% 
+      filter(!is.na(insurance_coverage), !is.na(UrbanicityIndex)),
+    aes(
+      x = X, y = Y,
+      size = UrbanicityIndex,          # bubble size = urbanicity
+      fill = insurance_coverage * 100  # bubble color = insurance rate
+    ),
+    shape = 21, color = "gray40", alpha = 0.85
+  ) +
+
+  # --- Fill scale for insurance rate (lighter blue gradient) ---
+  scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#eff3ff", high = "#2171b5",
+    breaks = seq(70, 100, by = 5),
+    labels = function(x) sprintf("%.0f%%", x),
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Size scale for urbanicity ---
+  scale_size_continuous(
+    trans = "reverse",                   # smaller = more urban → bigger bubble
+    range = c(1, 10),                    # control bubble size range
+    limits = c(1, 5),                    # expected index range
+    breaks = c(2, 3, 4),
+    name = "Urbanicity Index\n(smaller = more urban)",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Coordinates ---
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"
+  ) +
+
+  # --- State labels ---
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+
+  # --- Theme ---
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 400, 10, 140)
+  ) +
+
+  labs(
+    title    = "Influenza Vaccination, Insurance, and Urbanicity by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index"
+  )
+
+```
+
+
+1.2.1 influenza in 2022 + urbanicity
+```{r}
+bb <- sf::st_bbox(map_flu_2022)
+
+#p_flu_urbanity_2022 <- 
+
+ggplot() +
+  # states
+  geom_sf(data = map_flu_2022,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+  # centroids: smaller index => larger size  (use reverse transform)
+geom_point(
+  data = centroids_df_flu_2022,
+  aes(
+    x = X, y = Y,
+    size = UrbanicityIndex
+  ),
+  color = "#045a8d",   
+  fill  = "#67a9cf",   
+  shape = 21,
+  alpha = 0.8
+) +
+scale_size_continuous(
+  trans = "reverse",             
+  range = c(1, 20),  
+  limits = c(1, 5),                 
+  breaks = c(2, 3, 4),             
+  name = "Urbanicity Index\n(smaller = more urban)"
+)+
+  # fill scale
+  scale_fill_manual(
+    name   = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    drop = FALSE,
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Influenza Vaccination and Urbanicity by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Red circles: urbanicity index"
+  )
+```
+1.2.2 influenza in 2022 + insurance
+```{r}
+ggplot() +
+  # states
+geom_sf(data = map_flu_2022,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+ggnewscale::new_scale_fill() +
+geom_point(
+    data = centroids_df_flu_2022|> dplyr::filter(!is.na(insurance_coverage)),
+    aes(x = X, y = Y, fill = insurance_coverage*100),
+    shape = 21, size = 12, alpha = 0.8
+  ) +
+scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#eff3ff",  high = "#2171b5",
+    breaks = seq(70, 100, by = 5), 
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +  
+
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Influenza Vaccination and Insurance Rate by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Circles: insurance rate"
+  )
+```
+1.2.3 influenza in 2022 + both
+```{r}
+p_flu_both_2022 <- ggplot() +
+  # --- States: vaccination rate ---
+  geom_sf(
+    data = map_flu_2022,
+    aes(fill = Estimate_bin),
+    color = "gray40", size = 0.3
+  ) +
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  ggnewscale::new_scale_fill() +
+
+  # --- Circles: insurance rate (color) + urbanicity (size) ---
+  geom_point(
+    data = centroids_df_flu_2022 %>% 
+      filter(!is.na(insurance_coverage), !is.na(UrbanicityIndex)),
+    aes(
+      x = X, y = Y,
+      size = UrbanicityIndex,          # bubble size = urbanicity
+      fill = insurance_coverage * 100  # bubble color = insurance rate
+    ),
+    shape = 21, color = "gray40", alpha = 0.85
+  ) +
+
+  # --- Fill scale for insurance rate (lighter blue gradient) ---
+  scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#eff3ff", high = "#2171b5",
+    breaks = seq(70, 100, by = 5),
+    labels = function(x) sprintf("%.0f%%", x),
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Size scale for urbanicity ---
+  scale_size_continuous(
+    trans = "reverse",                   # smaller = more urban → bigger bubble
+    range = c(1, 10),                    # control bubble size range
+    limits = c(1, 5),                    # expected index range
+    breaks = c(2, 3, 4),
+    name = "Urbanicity Index\n(smaller = more urban)",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Coordinates ---
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"
+  ) +
+
+  # --- State labels ---
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+
+  # --- Theme ---
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 400, 10, 140)
+  ) +
+
+  labs(
+    title    = "Influenza Vaccination, Insurance, and Urbanicity by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index"
+  )
+
+```
+
+
+
+1.3.1 tdap in 2013 + urbanicity
+```{r}
+bb <- sf::st_bbox(map_tdap_2013)
+
+# p_tdap_urbanity_2013 <- 
+
+ggplot() +
+  # states
+  geom_sf(data = map_tdap_2013,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+  # centroids: smaller index => larger size  (use reverse transform)
+geom_point(
+  data = centroids_df_tdap_2013,
+  aes(
+    x = X, y = Y,
+    size = UrbanicityIndex
+  ),
+  color = "#ffdd33",  
+  fill  = "#ffff99",   
+  shape = 21,
+  alpha = 0.8
+) +
+scale_size_continuous(
+  trans = "reverse",             
+  range = c(1, 20),  
+  limits = c(1, 5),                 
+  breaks = c(2, 3, 4),              
+  name = "Urbanicity Index\n(smaller = more urban)"
+)+
+  # fill scale
+  scale_fill_manual(
+    name   = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    drop = FALSE,
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Tdap Vaccination and Urbanicity by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Red circles: urbanicity index"
+  )
+```
+1.3.2 tdap in 2013 + insurance
+```{r}
+ggplot() +
+  # states
+geom_sf(data = map_tdap_2013,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+ggnewscale::new_scale_fill() +
+geom_point(
+    data = centroids_df_tdap_2013|> dplyr::filter(!is.na(insurance_coverage)),
+    aes(x = X, y = Y, fill = insurance_coverage*100),
+    shape = 21, size = 12, alpha = 0.8
+  ) +
+scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#fff7bc", high = "#d95f0e", 
+    breaks = seq(70, 100, by = 5), 
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +  
+
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Tdap Vaccination and Insurance Rate by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Circles: insurance rate"
+  )
+```
+1.3.3 tdap in 2013 + both
+```{r}
+p_tdap_both_2013 <- ggplot() +
+  # --- States: vaccination rate ---
+  geom_sf(
+    data = map_tdap_2013,
+    aes(fill = Estimate_bin),
+    color = "gray40", size = 0.3
+  ) +
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  ggnewscale::new_scale_fill() +
+
+  # --- Circles: insurance rate (color) + urbanicity (size) ---
+  geom_point(
+    data = centroids_df_tdap_2013 %>% 
+      filter(!is.na(insurance_coverage), !is.na(UrbanicityIndex)),
+    aes(
+      x = X, y = Y,
+      size = UrbanicityIndex,          # bubble size = urbanicity
+      fill = insurance_coverage * 100  # bubble color = insurance rate
+    ),
+    shape = 21, color = "gray40", alpha = 0.85
+  ) +
+
+  # --- Fill scale for insurance rate (lighter blue gradient) ---
+  scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#fff7bc", high = "#d95f0e", 
+    breaks = seq(70, 100, by = 5),
+    labels = function(x) sprintf("%.0f%%", x),
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Size scale for urbanicity ---
+  scale_size_continuous(
+    trans = "reverse",                   # smaller = more urban → bigger bubble
+    range = c(1, 10),                    # control bubble size range
+    limits = c(1, 5),                    # expected index range
+    breaks = c(2, 3, 4),
+    name = "Urbanicity Index\n(smaller = more urban)",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Coordinates ---
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"
+  ) +
+
+  # --- State labels ---
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+
+  # --- Theme ---
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 400, 10, 140)
+  ) +
+
+  labs(
+    title    = "Tdap Vaccination, Insurance, and Urbanicity by State (2013)",
+    subtitle = "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index"
+  )
+
+```
+1.4.1 tdap in 2022 + urbanicity
+```{r}
+# p_tdap_urbanity_2022 <- 
+
+bb <- sf::st_bbox(map_tdap_2022)
+
+#p_flu_urbanity_2022 <- 
+
+ggplot() +
+  # states
+  geom_sf(data = map_tdap_2022,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+  # centroids: smaller index => larger size  (use reverse transform)
+geom_point(
+  data = centroids_df_tdap_2022,
+  aes(
+    x = X, y = Y,
+    size = UrbanicityIndex
+  ),
+  color = "#ffdd33",  
+  fill  = "#ffff99",   
+  shape = 21,
+  alpha = 0.8
+) +
+scale_size_continuous(
+  trans = "reverse",             
+  range = c(1, 20),  
+  limits = c(1, 5),                 
+  breaks = c(2, 3, 4),              
+  name = "Urbanicity Index\n(smaller = more urban)"
+)+
+  # fill scale
+  scale_fill_manual(
+    name   = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    drop = FALSE,
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Tdap Vaccination and Urbanicity by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Red circles: urbanicity index"
+  )
+```
+1.4.2 tdap in 2022 + insurance
+```{r}
+ggplot() +
+  # states
+geom_sf(data = map_tdap_2022,
+          aes(fill = Estimate_bin),
+          color = "gray40", size = 0.3) +
+scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+ggnewscale::new_scale_fill() +
+geom_point(
+    data = centroids_df_tdap_2022|> dplyr::filter(!is.na(insurance_coverage)),
+    aes(x = X, y = Y, fill = insurance_coverage*100),
+    shape = 21, size = 12, alpha = 0.8
+  ) +
+scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#fff7bc", high = "#d95f0e", 
+    breaks = seq(70, 100, by = 5), 
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +  
+
+  guides(size = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)) +
+  # use bbox from the same CRS so nothing gets clipped
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"    
+  ) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 300, 10, 140)
+  ) +
+  labs(
+    title    = "Tdap Vaccination and Insurance Rate by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Circles: insurance rate"
+  )
+```
+1.4.3 tdap in 2022 + both
+```{r}
+p_tdap_both_2022 <- ggplot() +
+  # --- States: vaccination rate ---
+  geom_sf(
+    data = map_tdap_2022,
+    aes(fill = Estimate_bin),
+    color = "gray40", size = 0.3
+  ) +
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  ggnewscale::new_scale_fill() +
+
+  # --- Circles: insurance rate (color) + urbanicity (size) ---
+  geom_point(
+    data = centroids_df_tdap_2022 %>% 
+      filter(!is.na(insurance_coverage), !is.na(UrbanicityIndex)),
+    aes(
+      x = X, y = Y,
+      size = UrbanicityIndex,          # bubble size = urbanicity
+      fill = insurance_coverage * 100  # bubble color = insurance rate
+    ),
+    shape = 21, color = "gray40", alpha = 0.85
+  ) +
+
+  # --- Fill scale for insurance rate (lighter blue gradient) ---
+  scale_fill_gradient(
+    name = "Insurance rate (%)",
+    low = "#fff7bc", high = "#d95f0e", 
+    breaks = seq(70, 100, by = 5),
+    labels = function(x) sprintf("%.0f%%", x),
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Size scale for urbanicity ---
+  scale_size_continuous(
+    trans = "reverse",                   # smaller = more urban → bigger bubble
+    range = c(1, 10),                    # control bubble size range
+    limits = c(1, 5),                    # expected index range
+    breaks = c(2, 3, 4),
+    name = "Urbanicity Index\n(smaller = more urban)",
+    guide = guide_legend(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+
+  # --- Coordinates ---
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    expand = FALSE,
+    clip = "off"
+  ) +
+
+  # --- State labels ---
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+
+  # --- Theme ---
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle= element_text(size = 12, hjust = 0.5),
+    plot.margin  = margin(10, 400, 10, 140)
+  ) +
+
+  labs(
+    title    = "Tdap Vaccination, Insurance, and Urbanicity by State (2022)",
+    subtitle = "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index"
+  )
+
+```
+
+Influenza comparison
+```{r}
+# Remove titles
+p11_notitle <- p_flu_both_2013 + labs(title = NULL, subtitle = NULL)
+p21_notitle <- p_flu_both_2022 + labs(title = NULL, subtitle = NULL)
+
+# Remove legend from left map
+p11_noleg <- p11_notitle + theme(
+  legend.position = "none",
+  plot.margin = margin(5, 0, 5, 40)
+)
+
+# Keep legend on right map
+p21_leg <- p21_notitle + theme(
+  legend.position = "right",
+  legend.box = "vertical",
+  legend.justification = c(0, 0.5),
+  legend.spacing.y = unit(0.15, "cm"),
+  legend.key.height = unit(0.4, "cm"),
+  legend.key.width  = unit(0.3, "cm"),
+  legend.title = element_text(size = 10, face = "bold"),
+  legend.text = element_text(size = 8),
+  legend.background = element_rect(fill = "white", color = "gray80"),
+  plot.margin = margin(5, 10, 5, 0)
+)
+
+# Combine plots
+combined_flu1 <- plot_grid(
+  p11_noleg, p21_leg,
+  ncol = 2,
+  align = "hv",
+  rel_widths = c(1.05, 1)
+)
+
+# Add shared title and subtitle
+final_plot_flu1 <- ggdraw() +
+  draw_label(
+    "Maternal Influenza Vaccination by Urbanicity and Insurance (2013 vs 2022)",
+    fontface = "bold", size = 18,
+    x = 0.5, y = 0.98, hjust = 0.5
+  ) +
+  draw_label(
+    "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index",
+    size = 12, x = 0.5, y = 0.93, hjust = 0.5, color = "gray20"
+  ) +
+  draw_plot(combined_flu1, y = 0, height = 0.9)
+
+# Display
+final_plot_flu1
+
+# Save figure
+ggsave(
+  "Maternal_Influenza_Vaccination_by_urbanicity_insurance.png",
+  plot = final_plot_flu1,
+  width = 16, height = 7, dpi = 300, bg = "white"
+)
+```
+Tdap comparison
+```{r}
+# Remove titles from each subplot
+p31_notitle <- p_tdap_both_2013 + labs(title = NULL, subtitle = NULL)
+p41_notitle <- p_tdap_both_2022 + labs(title = NULL, subtitle = NULL)
+
+# Left plot: no legend, tight margins
+p31_noleg <- p31_notitle + theme(
+  legend.position = "none",
+  plot.margin = margin(5, 0, 5, 40)
+)
+
+# Right plot: keep legends, tidy spacing
+p41_leg <- p41_notitle + theme(
+  legend.position = "right",
+  legend.box = "vertical",
+  legend.justification = c(0, 0.5),
+  legend.spacing.y = unit(0.15, "cm"),
+  legend.key.height = unit(0.4, "cm"),
+  legend.key.width  = unit(0.3, "cm"),
+  legend.title = element_text(size = 10, face = "bold"),
+  legend.text = element_text(size = 8),
+  legend.background = element_rect(fill = "white", color = "gray80"),
+  plot.margin = margin(5, 10, 5, 0)
+)
+
+# Combine plots side-by-side
+combined_tdap1 <- plot_grid(
+  p31_noleg, p41_leg,
+  ncol = 2, align = "hv",
+  rel_widths = c(1.05, 1)
+)
+
+# Add shared title and subtitle
+final_plot_tdap1 <- ggdraw() +
+  draw_label(
+    "Maternal Tdap Vaccination by Urbanicity and Insurance (2013 vs 2022)",
+    fontface = "bold", size = 18,
+    x = 0.5, y = 0.98, hjust = 0.5
+  ) +
+  draw_label(
+    "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index",
+    size = 12, x = 0.5, y = 0.93, hjust = 0.5, color = "gray20"
+  ) +
+  draw_plot(combined_tdap1, y = 0, height = 0.9)
+
+# Display
+final_plot_tdap1
+
+# Save high-resolution image
+ggsave(
+  "Maternal_Tdap_Vaccination_by_urbanicity_insurance.png",
+  plot = final_plot_tdap1,
+  width = 16, height = 7, dpi = 300, bg = "white"
+)
+```
+
+
+● 1.2 Compare the spatial clustering patterns of maternal vaccination coverage between 2013 and 2022 to
+assess temporal changes in geographic disparities and evaluate whether the distribution of low-coverage
+clusters has shifted over the decade.
+
+2.1 influenza in 2013
+```{r}
+p_flu_2013 <-ggplot() +
+  # filled states with border
+  geom_sf(data = map_flu_2013, aes(fill = Estimate_bin), color = "gray40", size = 0.3) +
+  # large states: centered labels
+  geom_text(data = labels_large, aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  # fill scale with NA shown as "No data"
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    drop = FALSE,
+    na.value = "gray90",
+    na.translate = TRUE,
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.90, 0.12),      # bottom-right
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 8),
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5,
+                             keyheight = unit(0.5, "cm"), keywidth = unit(0.8, "cm"),
+                             ncol = 1)) + 
+  labs(title = "Maternal Influenza Vaccination in 2013")
+```
+2.2 influenza in 2022
+```{r}
+p_flu_2022 <- ggplot() +
+  # filled states with border
+  geom_sf(data = map_flu_2022, aes(fill = Estimate_bin), color = "gray40", size = 0.3) +
+  # large states: centered labels
+  geom_text(data = labels_large, aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  # fill scale with NA shown as "No data"
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#fff5eb", "#fee6ce", "#fdae6b", "#e6550d", "#a63603"),
+    breaks = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", NA),
+    drop = FALSE,
+    na.value = "gray90",
+    na.translate = TRUE,
+    labels = c("<51%", "51–57%", "57–62%", "62–67%", ">67%", "No data")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.90, 0.12),      # bottom-right
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 8),
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5,
+                             keyheight = unit(0.5, "cm"), keywidth = unit(0.8, "cm"),
+                             ncol = 1)) + 
+  labs(title = "Maternal Influenza Vaccination in 2022")
+
+```
+2.3 tdap in 2013
+```{r}
+p_tdap_2013 <- ggplot() +
+  # filled states with border
+  geom_sf(data = map_tdap_2013, aes(fill = Estimate_bin), color = "gray40", size = 0.3) +
+  # large states: centered labels
+  geom_text(data = labels_large, aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  # fill scale with NA shown as "No data"
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    drop = FALSE,
+    na.value = "gray90",
+    na.translate = TRUE,
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.90, 0.12),      # bottom-right
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 8),
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5,
+                             keyheight = unit(0.5, "cm"), keywidth = unit(0.8, "cm"),
+                             ncol = 1)) +
+  labs(title = "Maternal Tdap Vaccination in 2013")
+
+```
+2.4 tdap in 2022
+```{r}
+p_tdap_2022 <- ggplot() +
+  # filled states with border
+  geom_sf(data = map_tdap_2022, aes(fill = Estimate_bin), color = "gray40", size = 0.3) +
+  # large states: centered labels
+  geom_text(data = labels_large, aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  # fill scale with NA shown as "No data"
+  scale_fill_manual(
+    name = "Percent vaccinated",
+    values = c("#e0ecf4", "#9ebcda", "#8c96c6", "#8856a7", "#810f7c"),
+    breaks = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", NA),
+    drop = FALSE,
+    na.value = "gray90",
+    na.translate = TRUE,
+    labels = c("<58%", "58–72%", "72–78%", "78–82%", ">82%", "No data")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.90, 0.12),      # bottom-right
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 8),
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5,
+                             keyheight = unit(0.5, "cm"), keywidth = unit(0.8, "cm"),
+                             ncol = 1)) + 
+  labs(title = "Maternal Tdap Vaccination in 2022")
+```
+Influenza comparison
+```{r}
+# Subplots (titles plain)
+p1 <- p_flu_2013 + theme(plot.title = element_text(face = "plain"))
+p2 <- p_flu_2022 + theme(plot.title = element_text(face = "plain"))
+
+# Remove legend from left, keep and move legend in right
+p1_noleg <- p1 + theme(legend.position = "none")
+
+p2_leg <- p2 + theme(
+  legend.position = c(0.98, 0.02), 
+  legend.justification = c(1, 0),
+  legend.title = element_text(size = 10, face = "bold"),
+  legend.text = element_text(size = 8),
+  legend.background = element_rect(fill = "white", color = "gray70")
+)
+
+# Combine plots side by side
+combined_flu <- plot_grid(p1_noleg, p2_leg, ncol = 2, align = "hv")
+
+# Add shared title (bold)
+final_plot_flu <- ggdraw() +
+  draw_label(
+    "Spatial Patterns of Maternal Influenza Vaccination (2013 vs 2022)",
+    fontface = "bold", size = 20,
+    x = 0.5, y = 0.97, hjust = 0.5
+  ) +
+  draw_plot(combined_flu, y = 0, height = 1)
+
+final_plot_flu
+
+ggsave("Maternal_Influenza_Vaccination.png",
+       plot = final_plot_flu,
+       width = 20, height = 8, dpi = 300)
+
+```
+Tdap comparison
+```{r}
+# Subplots (titles plain)
+p3 <- p_tdap_2013 + theme(plot.title = element_text(face = "plain"))
+p4 <- p_tdap_2022 + theme(plot.title = element_text(face = "plain"))
+
+# Remove legend from left, keep and move legend in right
+p3_noleg <- p3 + theme(legend.position = "none")
+
+p4_leg <- p4 + theme(
+  legend.position = c(0.98, 0.02), 
+  legend.justification = c(1, 0),
+  legend.title = element_text(size = 10, face = "bold"),
+  legend.text = element_text(size = 8),
+  legend.background = element_rect(fill = "white", color = "gray70")
+)
+
+# Combine plots side by side
+combined_tdap <- plot_grid(p3_noleg, p4_leg, ncol = 2, align = "hv")
+
+# Add shared title (bold)
+final_plot_tdap <- ggdraw() +
+  draw_label(
+    "Spatial Patterns of Maternal Tdap Vaccination (2013 vs 2022)",
+    fontface = "bold", size = 20,
+    x = 0.5, y = 0.97, hjust = 0.5
+  ) +
+  draw_plot(combined_tdap, y = 0, height = 1)
+
+final_plot_tdap
+
+ggsave("Maternal_Tdap_Vaccination.png",
+       plot = final_plot_tdap,
+       width = 20, height = 8, dpi = 300)
+
+```
