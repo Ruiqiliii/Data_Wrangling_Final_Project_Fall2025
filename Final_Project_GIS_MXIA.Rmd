@@ -111,6 +111,29 @@ df <- df %>%
   mutate(State = toupper(State)) %>% 
   mutate(insurance_coverage = Insured/(Insured+Uninsured)) 
 
+df[df$State_full=="Alabama",]
+
+df_change <- df %>%
+  group_by(State_full, Vaccine) %>%
+  arrange(Year, .by_group = TRUE) %>%
+  slice(c(1, n())) %>%
+  mutate(time_point = c("first", "last")) %>%
+  select(State_full, Vaccine, time_point,
+         Weighted_Estimate, UrbanicityIndex, insurance_coverage) %>%
+  pivot_wider(
+    names_from = time_point,
+    values_from = c(Weighted_Estimate, insurance_coverage),
+    names_prefix = ""
+  ) %>%
+  mutate(
+    Estimate_change = Weighted_Estimate_last - Weighted_Estimate_first,
+    Insurance_change = insurance_coverage_last - insurance_coverage_first
+  ) 
+
+df <- df %>%
+  left_join(df_change %>% select(State_full, Vaccine, Estimate_change, Insurance_change),
+            by = c("State_full", "Vaccine"))
+
 head(df)
 ```
 ## 2. Prepare mapping data
@@ -144,6 +167,12 @@ quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(Weighted_Estimate), pro
 
 quantile(map_data %>% filter(Vaccine == "Influenza") %>% pull(insurance_coverage), prob = c(0.2, 0.4, 0.6, 0.8, 1))
 quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(insurance_coverage), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+
+quantile(map_data %>% filter(Vaccine == "Influenza") %>% pull(Estimate_change), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(Estimate_change), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+
+quantile(map_data %>% filter(Vaccine == "Influenza") %>% pull(Insurance_change), prob = c(0.2, 0.4, 0.6, 0.8, 1))
+quantile(map_data %>% filter(Vaccine == "Tdap") %>% pull(Insurance_change), prob = c(0.2, 0.4, 0.6, 0.8, 1))
 
 map_all <- map_data %>%
   mutate(
@@ -205,7 +234,68 @@ map_all <- map_data %>%
       )),
       
       TRUE ~ NA_character_
-    )
+    ),
+    
+    Estimate_change_bin = case_when(
+      Vaccine == "Influenza" & !is.na(Estimate_change) ~ as.character(cut(
+        Estimate_change,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Influenza", !is.na(Estimate_change)) %>%
+            pull(Estimate_change),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<0", "0–7%", "7–9%", "9–12%", ">12%"),
+        include.lowest = TRUE
+      )),
+      
+      Vaccine == "Tdap" & !is.na(Estimate_change) ~ as.character(cut(
+        Estimate_change,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Tdap", !is.na(Estimate_change)) %>%
+            pull(Estimate_change),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<3%", "3–5%", "5–42%", "42–59%", ">59%"),
+        include.lowest = TRUE
+      )),
+      
+      TRUE ~ NA_character_
+    ),
+    
+     Insurance_change_bin = case_when(
+      Vaccine == "Influenza" & !is.na(Insurance_change) ~ as.character(cut(
+        Insurance_change,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Influenza", !is.na(Insurance_change)) %>%
+            pull(Insurance_change),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("<3%", "3–5%", "5–8%", "8–13%", ">13%"),
+        include.lowest = TRUE
+      )),
+      
+      Vaccine == "Tdap" & !is.na(Insurance_change) ~ as.character(cut(
+        Insurance_change,
+        breaks = quantile(
+          map_data %>%
+            filter(Vaccine == "Tdap", !is.na(Insurance_change)) %>%
+            pull(Insurance_change),
+          probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+          na.rm = TRUE
+        ),
+        labels = c("0%", "0–3%", "3–5%", "5–8%", ">8%"),
+        include.lowest = TRUE
+      )),
+      
+      TRUE ~ NA_character_
+    ),
+    
   )
 ```
 
@@ -552,7 +642,7 @@ p_flu_both_2013 <- ggplot() +
     legend.text  = element_text(size = 9),
     plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
     plot.subtitle= element_text(size = 12, hjust = 0.5),
-    plot.margin  = margin(10, 400, 10, 140)
+    plot.margin = margin(10, 20, 10, 20)
   ) +
 
   labs(
@@ -777,7 +867,7 @@ p_flu_both_2022 <- ggplot() +
     legend.text  = element_text(size = 9),
     plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
     plot.subtitle= element_text(size = 12, hjust = 0.5),
-    plot.margin  = margin(10, 400, 10, 140)
+    plot.margin = margin(10, 20, 10, 20)
   ) +
 
   labs(
@@ -1003,7 +1093,7 @@ p_tdap_both_2013 <- ggplot() +
     legend.text  = element_text(size = 9),
     plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
     plot.subtitle= element_text(size = 12, hjust = 0.5),
-    plot.margin  = margin(10, 400, 10, 140)
+    plot.margin = margin(10, 20, 10, 20)
   ) +
 
   labs(
@@ -1228,7 +1318,7 @@ p_tdap_both_2022 <- ggplot() +
     legend.text  = element_text(size = 9),
     plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
     plot.subtitle= element_text(size = 12, hjust = 0.5),
-    plot.margin  = margin(10, 400, 10, 140)
+    plot.margin = margin(10, 20, 10, 20)
   ) +
 
   labs(
@@ -1247,7 +1337,7 @@ p21_notitle <- p_flu_both_2022 + labs(title = NULL, subtitle = NULL)
 # Remove legend from left map
 p11_noleg <- p11_notitle + theme(
   legend.position = "none",
-  plot.margin = margin(5, 0, 5, 40)
+  plot.margin = margin(5, -1800, 5, 40)
 )
 
 # Keep legend on right map
@@ -1261,7 +1351,7 @@ p21_leg <- p21_notitle + theme(
   legend.title = element_text(size = 10, face = "bold"),
   legend.text = element_text(size = 8),
   legend.background = element_rect(fill = "white", color = "gray80"),
-  plot.margin = margin(5, 10, 5, 0)
+  plot.margin = margin(5, 5, 5, -400)
 )
 
 # Combine plots
@@ -1269,7 +1359,7 @@ combined_flu1 <- plot_grid(
   p11_noleg, p21_leg,
   ncol = 2,
   align = "hv",
-  rel_widths = c(1.05, 1)
+  rel_widths = c(1, 1)
 )
 
 # Add shared title and subtitle
@@ -1277,11 +1367,11 @@ final_plot_flu1 <- ggdraw() +
   draw_label(
     "Maternal Influenza Vaccination by Urbanicity and Insurance (2013 vs 2022)",
     fontface = "bold", size = 18,
-    x = 0.5, y = 0.98, hjust = 0.5
+    x = 0.5, y = 0.93, hjust = 0.5
   ) +
   draw_label(
     "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index",
-    size = 12, x = 0.5, y = 0.93, hjust = 0.5, color = "gray20"
+    size = 12, x = 0.5, y = 0.88, hjust = 0.5, color = "gray20"
   ) +
   draw_plot(combined_flu1, y = 0, height = 0.9)
 
@@ -1292,7 +1382,7 @@ final_plot_flu1
 ggsave(
   "Maternal_Influenza_Vaccination_by_urbanicity_insurance.png",
   plot = final_plot_flu1,
-  width = 16, height = 7, dpi = 300, bg = "white"
+  width = 20, height = 8, dpi = 300, bg = "white"
 )
 ```
 Tdap comparison
@@ -1304,7 +1394,7 @@ p41_notitle <- p_tdap_both_2022 + labs(title = NULL, subtitle = NULL)
 # Left plot: no legend, tight margins
 p31_noleg <- p31_notitle + theme(
   legend.position = "none",
-  plot.margin = margin(5, 0, 5, 40)
+  plot.margin = margin(5, -1800, 5, 40)
 )
 
 # Right plot: keep legends, tidy spacing
@@ -1318,14 +1408,14 @@ p41_leg <- p41_notitle + theme(
   legend.title = element_text(size = 10, face = "bold"),
   legend.text = element_text(size = 8),
   legend.background = element_rect(fill = "white", color = "gray80"),
-  plot.margin = margin(5, 10, 5, 0)
+  plot.margin = margin(5, 5, 5, -400)
 )
 
 # Combine plots side-by-side
 combined_tdap1 <- plot_grid(
   p31_noleg, p41_leg,
   ncol = 2, align = "hv",
-  rel_widths = c(1.05, 1)
+  rel_widths = c(1, 1)
 )
 
 # Add shared title and subtitle
@@ -1333,11 +1423,11 @@ final_plot_tdap1 <- ggdraw() +
   draw_label(
     "Maternal Tdap Vaccination by Urbanicity and Insurance (2013 vs 2022)",
     fontface = "bold", size = 18,
-    x = 0.5, y = 0.98, hjust = 0.5
+    x = 0.5, y = 0.93, hjust = 0.5
   ) +
   draw_label(
     "Orange fill: maternal vaccination rate | Blue fill: insurance rate | Bubble size: urbanicity index",
-    size = 12, x = 0.5, y = 0.93, hjust = 0.5, color = "gray20"
+    size = 12, x = 0.5, y = 0.88, hjust = 0.5, color = "gray20"
   ) +
   draw_plot(combined_tdap1, y = 0, height = 0.9)
 
@@ -1348,7 +1438,7 @@ final_plot_tdap1
 ggsave(
   "Maternal_Tdap_Vaccination_by_urbanicity_insurance.png",
   plot = final_plot_tdap1,
-  width = 16, height = 7, dpi = 300, bg = "white"
+  width = 20, height = 8, dpi = 300, bg = "white"
 )
 ```
 
@@ -1544,7 +1634,7 @@ final_plot_flu
 
 ggsave("Maternal_Influenza_Vaccination.png",
        plot = final_plot_flu,
-       width = 20, height = 8, dpi = 300)
+       width = 20, height = 8, dpi = 300, bg = "white")
 
 ```
 Tdap comparison
@@ -1580,6 +1670,237 @@ final_plot_tdap
 
 ggsave("Maternal_Tdap_Vaccination.png",
        plot = final_plot_tdap,
-       width = 20, height = 8, dpi = 300)
+       width = 20, height = 8, dpi = 300, bg = "white")
 
+```
+Estimate change and insurance coverage change
+
+Flu vaccination change and insurance coverage change
+```{r}
+# merge with state polygons
+map_change_flu <- states_sf %>%
+  left_join(
+    dat %>%
+      distinct(State_full, Vaccine, .keep_all = TRUE) %>%
+      filter(Vaccine == "Influenza") %>%
+      mutate(
+        Estimate_change_bin = as.factor(Estimate_change_bin),
+        Insurance_change_bin = as.factor(Insurance_change_bin)
+      ),
+    by = c("STUSPS" = "STUSPS")
+  )
+
+# compute centroids for circles
+centroids_change_flu <- st_centroid(map_change_flu)
+centroids_df_change_flu <- cbind(
+  st_coordinates(centroids_change_flu),
+  st_drop_geometry(map_change_flu)
+)
+
+bb <- sf::st_bbox(map_change_flu)
+
+# ---- plotting ----
+flu_change <- ggplot() +
+  
+  ## ---- 1. Orange fill for vaccination change ----
+geom_sf(data = map_change_flu,
+        aes(fill = Estimate_change_bin),
+        color = "gray40", size = 0.3) +
+  scale_fill_manual(
+    name = "Percent vaccinated change",
+    values = c("#fff5eb", "#fed98e", "#ec7014", "#cc4c02", "#993404"),
+    breaks = c("<0", "0–7%", "7–9%", "9–12%", ">12%", NA),
+    labels = c("<0", "0–7%", "7–9%", "9–12%", ">12%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+  ## ---- 2. Reset fill scale for insurance change ----
+ggnewscale::new_scale_fill() +
+  
+  geom_point(
+    data = centroids_df_change_flu %>% filter(!is.na(Insurance_change)),
+    aes(x = X, y = Y, fill = Insurance_change * 100),
+    shape = 21, size = 12, alpha = 0.8
+  ) +
+  scale_fill_gradientn(
+    name = "Insurance rate change (%)",
+    colors = c("#eff3ff", "#bdd7e7", "#6baed6", "#2171b5"),
+    limits = c(min(centroids_df_change_flu$Insurance_change * 100), max(centroids_df_change_flu$Insurance_change * 100)),
+    breaks = seq(-5, 20, by = 5),
+    guide = guide_colorbar(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+  ## ---- 3. Layout, text, and themes ----
+coord_sf(
+  xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+  ylim = c(bb["ymin"], bb["ymax"]),
+  expand = FALSE,
+  clip = "off"
+) +
+  
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    # plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    # plot.subtitle= element_text(size = 12, hjust = 0.5),
+    # plot.margin  = margin(10, 300, 10, 140)
+  plot.title = element_text(
+    size = 16, face = "bold", hjust = 0.5,
+    margin = margin(t = 5, b = 8)   # reduce top margin (was 30), keep small gap below
+  ),
+  plot.subtitle = element_text(
+    size = 12, hjust = 0.5,
+    margin = margin(b = 10)         # space between subtitle and plot
+  ),
+  plot.margin = margin(5, 50, 10, 100)  # reduce overall top plot margin
+  ) +
+  
+  labs(
+    title    = "Influenza Vaccination Change and Insurance Rate Change by State Over the Decade",
+    subtitle = "Orange fill: maternal vaccination rate change | Circles: insurance rate change"
+  )
+```
+Tdap vaccination change and insurance coverage change
+```{r}
+# ---- merge with state polygons ----
+map_change_Tdap <- states_sf %>%
+  left_join(
+    dat %>%
+      distinct(State_full, Vaccine, .keep_all = TRUE) %>%
+      filter(Vaccine == "Tdap") %>%
+      mutate(
+        Estimate_change_bin = as.factor(Estimate_change_bin),
+        Insurance_change_bin = as.factor(Insurance_change_bin)
+      ),
+    by = c("STUSPS" = "STUSPS")
+  )
+
+# ---- compute centroids ----
+centroids_change_Tdap <- st_centroid(map_change_Tdap)
+centroids_df_change_Tdap <- cbind(
+  st_coordinates(centroids_change_Tdap),
+  st_drop_geometry(map_change_Tdap)
+)
+
+bb <- sf::st_bbox(map_change_Tdap)
+
+# ---- plotting ----
+Tdap_change <- ggplot() +
+  
+  ## ---- 1. Fill for vaccination change ----
+geom_sf(data = map_change_Tdap,
+        aes(fill = Estimate_change_bin),
+        color = "gray40", size = 0.3) +
+  scale_fill_manual(
+    name = "Percent vaccinated change",
+    values = c("#e0ecf4", "#cbc9e2", "#9e9ac8", "#756bb1", "#54278f"),
+    breaks = c("<3%", "3–5%", "5–42%", "42–59%", ">59%", NA),
+    labels = c("<3%", "3–5%", "5–42%", "42–59%", ">59%", "No data"),
+    na.value = "gray90",
+    guide = guide_legend(order = 1, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+  ## ---- 2. Reset fill scale for insurance change ----
+ggnewscale::new_scale_fill() +
+  
+  geom_point(
+    data = centroids_df_change_Tdap %>% filter(!is.na(Insurance_change)),
+    aes(x = X, y = Y, fill = Insurance_change * 100),
+    shape = 21, size = 12, alpha = 0.85
+  ) +
+  scale_fill_gradientn(
+    name = "Insurance rate change (%)",
+    colors = c("#fff7bc", "#fee391", "#fec44f", "#d95f0e", "#993404"),
+    limits = c(min(centroids_df_change_Tdap$Insurance_change * 100), max(centroids_df_change_Tdap$Insurance_change * 100)),
+    breaks = seq(-5, 10, by = 5),
+    guide = guide_colorbar(order = 2, title.position = "top", title.hjust = 0.5)
+  ) +
+  
+  ## ---- 3. Layout, labels, theme ----
+coord_sf(
+  xlim = c(bb["xmin"], bb["xmax"] * 1.10),
+  ylim = c(bb["ymin"], bb["ymax"]),
+  expand = FALSE,
+  clip = "off"
+) +
+  geom_text(data = labels_large,
+            aes(x = cx, y = cy, label = STUSPS),
+            size = 2.8, color = "black") +
+  geom_segment(data = labels_small,
+               aes(x = cx, y = cy, xend = xend, yend = yend),
+               color = "black", linewidth = 0.2, lineend = "round") +
+  geom_text(data = labels_small,
+            aes(x = xlab, y = ylab, label = STUSPS),
+            size = 2.8, color = "black") +
+  
+  theme_void() +
+  theme(
+    legend.position = c(1.02, 0.06),
+    legend.box = "vertical",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+  #   plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+  #   plot.subtitle= element_text(size = 12, hjust = 0.5),
+  #   plot.margin  = margin(10, 300, 10, 140)
+  #   
+  #   
+  plot.title = element_text(
+    size = 16, face = "bold", hjust = 0.5,
+    margin = margin(t = 5, b = 8)   # reduce top margin (was 30), keep small gap below
+  ),
+  plot.subtitle = element_text(
+    size = 12, hjust = 0.5,
+    margin = margin(b = 10)         # space between subtitle and plot
+  ),
+  plot.margin = margin(5, 100, 10, 50)  # reduce overall top plot margin
+
+  ) +
+  labs(
+    title    = "Tdap Vaccination Change and Insurance Rate Change by State Over the Decade",
+    subtitle = "Purple fill: maternal vaccination rate change | Circles: insurance rate change"
+  )
+```
+
+```{r}
+# Combine plots with zero spacing
+combined_change <- plot_grid(
+  flu_change, 
+  Tdap_change,
+  ncol = 2,
+  align = "hv",
+  rel_widths = c(1, 1),
+  greedy = TRUE,
+  labels = NULL,
+  label_size = 0,
+  hjust = -2,           # pull them together even more
+  vjust = 1
+)
+
+# Remove all outer margins completely
+combined_change <- ggdraw(combined_change) +
+  theme(plot.margin = margin(0, 0, 0, -50)) 
+
+# Save
+ggsave(
+  "Change_over_decade.png",
+  plot = combined_change,
+  width = 24,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
 ```
