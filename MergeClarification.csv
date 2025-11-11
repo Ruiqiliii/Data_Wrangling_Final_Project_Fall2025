@@ -1,0 +1,15 @@
+Column Name,Meaning,Value Range / Unit,Source & Notes
+Vaccine,Vaccine type,Two categories: Flu / Tdap,"Original column from vacc_df, unchanged"
+Geography.Type,Type of geographic unit,"Fixed as ""State""","Original column from vacc_df, unchanged"
+Geography,Full state name,"e.g., ""New York"", ""Texas""",Original column from vacc_df (cleaned mixed entries like 'NY-City of New York')
+Survey.Year.Influenza.Season,Vaccination year,"Character, e.g., ""2018–19""","Original column from vacc_df, unchanged"
+Dimension.Type,Type of demographic dimension,Race/Ethnicity or Age Group,"Original column from vacc_df, unchanged"
+Dimension,Specific group,"Race: White, Non-Hispanic / Black, Non-Hispanic / Hispanic / Other or Multiple Races / Non-Hispanic; Age Group: ≥18 Years / 18–24 Years / 25–34 Years / ≥35 Years","Original column from vacc_df, unchanged"
+Estimate....,Vaccination coverage (%),0–100 (decimal or integer),"Original column from vacc_df, unchanged"
+X95..CI....,95% confidence interval,"String, e.g., ""65.0–72.3""","Original column from vacc_df, unchanged"
+Sample.Size,Sample size,Integer,"Original column from vacc_df, unchanged"
+State,State abbreviation,"NY, CA, TX, etc.",Newly generated from Geography column
+Year,Year (numeric),"Integer, e.g., 2018",Extracted from Survey.Year.Influenza.Season
+Insured,Number of insured individuals,Integer,From insurance dataset
+Uninsured,Number of uninsured individuals,Integer,From insurance dataset
+UrbanicityIndex,Urban–rural index,Approximately 1–6 (smaller = more urban),From urban_result dataset

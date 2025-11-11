@@ -1,0 +1,717 @@
+---
+title: "FinalProject"
+author: "XinyiYu"
+date: "2025-10-16"
+output:
+  pdf_document: default
+  html_document: default
+---
+packages
+```{r}
+library(readxl)
+library(dplyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+```
+
+
+CDC Pregnancy Vaccination
+```{r}
+#了Use Webscraping or an API for Data Collection
+vacc_url <- "https://data.cdc.gov/api/views/h7pm-wmjc/rows.csv?accessType=DOWNLOAD"
+vacc_df <- read.csv(vacc_url)
+
+#uniform NY
+vacc_df$Geography <- gsub("NY-City of New York", "New York", vacc_df$Geography)
+vacc_df$Geography <- gsub("NY-Rest of state", "New York", vacc_df$Geography)
+
+#eliminate others
+vacc_df <- vacc_df %>%
+  filter(!(Geography %in% c("United States", "Puerto Rico", "Commonwealth of the Northern Mariana Islands")))
+
+#State name to abbreviation
+state_abbrev <- c(
+  'Alabama' = 'AL', 'Alaska' = 'AK', 'Arizona' = 'AZ', 'Arkansas' = 'AR',
+  'California' = 'CA', 'Colorado' = 'CO', 'Connecticut' = 'CT', 'Delaware' = 'DE',
+  'District of Columbia' = 'DC', 'Florida' = 'FL', 'Georgia' = 'GA', 'Hawaii' = 'HI',
+  'Idaho' = 'ID', 'Illinois' = 'IL', 'Indiana' = 'IN', 'Iowa' = 'IA', 'Kansas' = 'KS',
+  'Kentucky' = 'KY', 'Louisiana' = 'LA', 'Maine' = 'ME', 'Maryland' = 'MD',
+  'Massachusetts' = 'MA', 'Michigan' = 'MI', 'Minnesota' = 'MN',
+  'Mississippi' = 'MS', 'Missouri' = 'MO', 'Montana' = 'MT', 'Nebraska' = 'NE',
+  'Nevada' = 'NV', 'New Hampshire' = 'NH', 'New Jersey' = 'NJ',
+  'New Mexico' = 'NM', 'New York' = 'NY', 'North Carolina' = 'NC',
+  'North Dakota' = 'ND', 'Ohio' = 'OH', 'Oklahoma' = 'OK', 'Oregon' = 'OR',
+  'Pennsylvania' = 'PA', 'Rhode Island' = 'RI', 'South Carolina' = 'SC',
+  'South Dakota' = 'SD', 'Tennessee' = 'TN', 'Texas' = 'TX', 'Utah' = 'UT',
+  'Vermont' = 'VT', 'Virginia' = 'VA', 'Washington' = 'WA',
+  'West Virginia' = 'WV', 'Wisconsin' = 'WI', 'Wyoming' = 'WY'
+)
+
+# add abbreviation column
+vacc_df <- vacc_df %>%
+  mutate(State = state_abbrev[Geography])
+write_csv(vacc_df, "vaccination.csv")
+head(vacc_df)
+```
+
+
+Urban-Rural Processing
+```{r}
+# Down load Urban-Rural
+url <- "https://www.cdc.gov/nchs/data/data-analysis/NCHSurb-rural-codes.csv"
+download.file(url, destfile = "urban_rural.xlsx", mode = "wb")
+urban_rural <- read_csv("/Users/yuxinyi/Dartmouth/data wrangling/finalProject/urban_rural.csv")
+
+#eliminate NA
+urban_rural <- urban_rural %>%
+  select(ST_ABBREV, CTYPOP, CODE2013, CODE2023) %>%
+  filter(!is.na(CTYPOP), !is.na(CODE2013), !is.na(CODE2023))
+
+# Calculate total state population
+state_pop <- urban_rural %>%
+  group_by(ST_ABBREV) %>%
+  summarise(STATEPOP = sum(CTYPOP, na.rm = TRUE))
+
+# Combine the total population and calculate the weight
+urban_rural <- urban_rural %>%
+  left_join(state_pop, by = "ST_ABBREV") %>%
+  mutate(WEIGHT = CTYPOP / STATEPOP,
+         INDEX2013 = CODE2013 * WEIGHT,
+         INDEX2023 = CODE2023 * WEIGHT)
+
+# Calculation of weighted urban and rural index & changes in 2013 and 2023
+urban_result <- urban_rural %>%
+  group_by(ST_ABBREV) %>%
+  summarise(INDEX2013 = sum(INDEX2013),
+            INDEX2023 = sum(INDEX2023)) %>%
+  mutate(CHANGE = INDEX2023 - INDEX2013) %>%
+  arrange(desc(CHANGE))
+head(urban_result)
+
+write.csv(urban_result, "state_urban_index_2013_2023.csv", row.names = FALSE)
+
+```
+
+insurance coverage
+```{r}
+folder <- "/Users/yuxinyi/Dartmouth/data wrangling"
+years <- setdiff(2012:2022, 2020)  # skip year 2020
+
+# State name to abbreviation
+state_abbrev <- c(
+  'Alabama' = 'AL', 'Alaska' = 'AK', 'Arizona' = 'AZ', 'Arkansas' = 'AR',
+  'California' = 'CA', 'Colorado' = 'CO', 'Connecticut' = 'CT', 'Delaware' = 'DE',
+  'District of Columbia' = 'DC', 'Florida' = 'FL', 'Georgia' = 'GA', 'Hawaii' = 'HI',
+  'Idaho' = 'ID', 'Illinois' = 'IL', 'Indiana' = 'IN', 'Iowa' = 'IA', 'Kansas' = 'KS',
+  'Kentucky' = 'KY', 'Louisiana' = 'LA', 'Maine' = 'ME', 'Maryland' = 'MD',
+  'Massachusetts' = 'MA', 'Michigan' = 'MI', 'Minnesota' = 'MN',
+  'Mississippi' = 'MS', 'Missouri' = 'MO', 'Montana' = 'MT', 'Nebraska' = 'NE',
+  'Nevada' = 'NV', 'New Hampshire' = 'NH', 'New Jersey' = 'NJ',
+  'New Mexico' = 'NM', 'New York' = 'NY', 'North Carolina' = 'NC',
+  'North Dakota' = 'ND', 'Ohio' = 'OH', 'Oklahoma' = 'OK', 'Oregon' = 'OR',
+  'Pennsylvania' = 'PA', 'Rhode Island' = 'RI', 'South Carolina' = 'SC',
+  'South Dakota' = 'SD', 'Tennessee' = 'TN', 'Texas' = 'TX', 'Utah' = 'UT',
+  'Vermont' = 'VT', 'Virginia' = 'VA', 'Washington' = 'WA',
+  'West Virginia' = 'WV', 'Wisconsin' = 'WI', 'Wyoming' = 'WY'
+)
+
+all_data <- list()
+
+#Loop to read all year data in one go
+for (year in years) {
+  file_path <- file.path(folder, paste0("raw_data", year, ".csv"))
+  
+  try({
+    #Use col_types to explicitly specify the format and skip the Footnotes and Total columns (not used)
+    df <- read_csv(
+      file_path,
+      skip = 2,
+      col_types = cols(
+        Location = col_character(),
+        Employer = col_double(),
+        `Non-Group` = col_double(),
+        Medicaid = col_double(),
+        Medicare = col_double(),
+        Military = col_double(),
+        Uninsured = col_double(),
+        Total = col_skip(),
+        Footnotes = col_skip()
+      )
+    )
+    # Keep only the state-level rows and remove the united state row.
+    df <- df %>%
+      filter(Location %in% names(state_abbrev))
+    #Add year and state abbreviations
+    df <- df %>%
+      mutate(
+        Year = year,
+        State = state_abbrev[Location],
+        Insured = Employer + `Non-Group` + Medicaid + Medicare + Military
+      ) %>%
+      select(Year, State, Insured, Uninsured)
+
+    #summarizing
+    all_data[[as.character(year)]] <- df
+    message("Processed ", year, " with ", nrow(df), " rows")
+    
+  }, silent = TRUE)
+}
+
+#merge
+insurance <- bind_rows(all_data)
+
+write_csv(insurance, "insurance_summary_by_state_2012_2022.csv")
+head(insurance)
+```
+
+merge
+```{r}
+#urban_rural only retains 2023. urban_merge is the version used for merge and is not saved as csv.
+urban_merge <- urban_result %>%
+  select(ST_ABBREV, INDEX2023) %>%
+  rename(State = ST_ABBREV,
+         UrbanicityIndex = INDEX2023)
+#merge
+merged_df <- vacc_df %>%
+  mutate(Year = as.numeric(`Survey.Year.Influenza.Season`)) %>%
+  left_join(insurance, by = c("State", "Year")) %>%
+  left_join(urban_merge, by = "State")
+head(merged_df)
+write_csv(merged_df, "MergedVersion.csv")
+```
+
+clean & simplify for regression
+```{r}
+#clean
+merged_clean <- merged_df %>%
+  filter(!is.na(Estimate....), !is.na(Uninsured), !is.na(Insured), 
+         !Estimate.... %in% c("NR*", "N/A", "--", "*")) %>% #ignore "NR*" in Estimate.... due to "NR*" represent the samples are too small and will influence following analysis
+  mutate(
+    Year = as.numeric(Survey.Year.Influenza.Season),
+    Coverage = as.numeric(str_replace(Estimate...., "%", "")),
+    UninsuredRate = Uninsured / (Insured + Uninsured)
+  )
+
+# simplify
+merged_summary <- merged_clean %>%
+  group_by(State, Year, Vaccine) %>%
+  summarise(
+    Coverage = mean(Coverage, na.rm = TRUE), 
+    UninsuredRate = mean(UninsuredRate, na.rm = TRUE),
+    UrbanicityIndex = first(UrbanicityIndex)
+  ) %>%
+  ungroup()
+head(merged_summary)
+```
+Influenza visualization&modeling
+```{r}
+merged_summary %>%
+  filter(Vaccine == "Influenza") %>%
+  ggplot(aes(x = UninsuredRate, y = Coverage)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = "Influenza Vaccination vs Uninsured Rate",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  )
+```
+
+```{r}
+model_flu <- lm(Coverage ~ UninsuredRate, data = merged_summary %>% filter(Vaccine == "Influenza"))
+summary(model_flu)
+```
+
+Tdap visualization&modeling
+```{r}
+merged_summary %>%
+  filter(Vaccine == "Tdap") %>%
+  ggplot(aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "black") +
+  geom_smooth(method = "lm", color = "darkred", se = TRUE) +
+  labs(
+    title = "Tdap Vaccination vs Uninsured Rate",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  )
+```
+```{r}
+tdap_model <- lm(Coverage ~ UninsuredRate, data = merged_summary %>% filter(Vaccine == "Tdap"))
+summary(tdap_model)
+```
+
+Stratified Analysis by Race for Influenza Vaccination
+Influenza&race
+```{r}
+influenza_race <- merged_df %>%
+  filter(
+    Vaccine == "Influenza",
+    Dimension.Type == "Race and Ethnicity",
+    !is.na(Estimate....),
+    !Estimate.... %in% c("NR*", "N/A", "--", "*")
+  ) %>%
+  mutate(
+    Coverage = as.numeric(str_replace(Estimate...., "%", "")),
+    Year = as.numeric(Survey.Year.Influenza.Season),
+    UninsuredRate = Uninsured / (Insured + Uninsured)
+  )
+unique(influenza_race$Dimension)
+```
+White, Non-Hispanic
+```{r}
+influenza_white <- influenza_race %>%
+  filter(Dimension == "White, Non-Hispanic")
+#plot
+ggplot(influenza_white, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (White, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_white))
+
+```
+Black, Non-Hispanic
+```{r}
+influenza_black <- influenza_race %>%
+  filter(Dimension == "Black, Non-Hispanic")
+#plot
+ggplot(influenza_black, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "forestgreen", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (Black, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_black))
+```
+Hispanic
+```{r}
+influenza_hispanic <- influenza_race %>%
+  filter(Dimension == "Hispanic")
+#plot
+ggplot(influenza_hispanic, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "orange", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_hispanic))
+```
+Other or Multiple Races, Non-Hispanic
+```{r}
+influenza_other <- influenza_race %>%
+  filter(Dimension == "Other or Multiple Races, Non-Hispanic")
+#plot
+ggplot(influenza_other, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "purple", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(title = "Influenza Coverage vs Uninsured Rate (Other or Multiple Races, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_other))
+```
+Merged Influenza Stratified by Race
+
+```{r}
+my_colors <- c(
+  "White, Non-Hispanic" = "#44d8ee",
+  "Black, Non-Hispanic" = "#679436",
+  "Hispanic" = "#be0aff",   
+  "Other or Multiple Races, Non-Hispanic" = "#f46197" 
+)
+
+ggplot(influenza_race, aes(
+  x = UninsuredRate,
+  y = Coverage,
+  color = Dimension,
+  shape = Dimension
+)) +
+  geom_point(size = 2, alpha = 0.6) + 
+  geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+  scale_color_manual(values = my_colors) + 
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate by Race/Ethnicity",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)",
+    color = "Race/Ethnicity",
+    shape = "Race/Ethnicity"
+  ) +
+  theme_classic() +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  theme(
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 6),
+    legend.key.size = unit(0.6, "lines")
+  )
+```
+
+
+Tdap&Race
+```{r}
+Tdap_race <- merged_df %>%
+  filter(
+    Vaccine == "Tdap",
+    Dimension.Type == "Race and Ethnicity",
+    !is.na(Estimate....),
+    !Estimate.... %in% c("NR*", "N/A", "--", "*")
+  ) %>%
+  mutate(
+    Coverage = as.numeric(str_replace(Estimate...., "%", "")),
+    Year = as.numeric(Survey.Year.Influenza.Season),
+    UninsuredRate = Uninsured / (Insured + Uninsured)
+  )
+unique(Tdap_race$Dimension)
+```
+White, Non-Hispanic
+```{r}
+Tdap_white <- Tdap_race %>%
+  filter(Dimension == "White, Non-Hispanic")
+#plot
+ggplot(Tdap_white, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (White, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = Tdap_white))
+
+```
+Black, Non-Hispanic
+```{r}
+Tdap_black <- Tdap_race %>%
+  filter(Dimension == "Black, Non-Hispanic")
+#plot
+ggplot(Tdap_black, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "forestgreen", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(title = "Tdap Coverage vs Uninsured Rate (Black, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data =Tdap_black))
+```
+Hispanic
+```{r}
+Tdap_hispanic <- Tdap_race %>%
+  filter(Dimension == "Hispanic")
+#plot
+ggplot(Tdap_hispanic, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "orange", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = Tdap_hispanic))
+```
+Other or Multiple Races, Non-Hispanic
+```{r}
+Tdap_other <- Tdap_race %>%
+  filter(Dimension == "Other or Multiple Races, Non-Hispanic")
+#plot
+ggplot(Tdap_other, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "purple", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(title = "Tdap Coverage vs Uninsured Rate (Other or Multiple Races, Non-Hispanic)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+#summary
+summary(lm(Coverage ~ UninsuredRate, data = Tdap_other))
+```
+
+Merged Tdap Stratified by Race
+```{r}
+ggplot(Tdap_race, aes(
+  x = UninsuredRate,
+  y = Coverage,
+  color = Dimension,
+  shape = Dimension
+)) +
+  geom_point(size = 2, alpha = 0.6) + 
+  geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+  scale_color_manual(values = my_colors) + 
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate by Race/Ethnicity",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)",
+    color = "Race/Ethnicity",
+    shape = "Race/Ethnicity"
+  ) +
+  theme_classic() +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  theme(
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 6),
+    legend.key.size = unit(0.6, "lines")
+  )
+```
+
+
+Stratified Analysis by Age Group for Influenza Vaccination
+Influenza&Age
+```{r}
+influenza_age <- merged_df %>%
+  filter(
+    Vaccine == "Influenza",
+    Dimension.Type == "Age",
+    !is.na(Estimate....),
+    !Estimate.... %in% c("NR*", "N/A", "--", "*")
+  ) %>%
+  mutate(
+    Coverage = as.numeric(str_replace(Estimate...., "%", "")),
+    Year = as.numeric(Survey.Year.Influenza.Season),
+    UninsuredRate = Uninsured / (Insured + Uninsured)
+  )
+unique(influenza_age$Dimension)
+```
+>=18 Years
+
+```{r}
+influenza_18 <- influenza_age %>%
+  filter(Dimension == ">=18 Years")
+
+# Plot
+ggplot(influenza_18, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (>=18 years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_18))
+```
+18-24 Years
+```{r}
+influenza_1824 <- influenza_age %>%
+  filter(Dimension == "18-24 Years")
+
+# Plot
+ggplot(influenza_1824, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "forestgreen", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (18-24 Years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_1824))
+```
+25-34 Years
+```{r}
+influenza_2534 <- influenza_age %>%
+  filter(Dimension == "25-34 Years")
+
+# Plot
+ggplot(influenza_1824, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "orange", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (25-34 Years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_2534))
+```
+>=35 Years
+
+```{r}
+influenza_35 <- influenza_age %>%
+  filter(Dimension == ">=35 Years")
+
+# Plot
+ggplot(influenza_1824, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "purple", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate (>=35 Years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data = influenza_35))
+```
+Merged Influenza Stratified by Age Group
+```{r}
+my_colors_age <- c(
+  ">=18 Years" = "#44d8ee",
+  "18-24 Years" = "#679436",
+  "25-34 Years" = "#be0aff",   
+  ">=35 Years" = "#f46197" 
+)
+ggplot(influenza_age, aes(
+  x = UninsuredRate,
+  y = Coverage,
+  color = Dimension,
+  shape = Dimension
+)) +
+  geom_point(size = 2, alpha = 0.6) + 
+  geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+  scale_color_manual(values = my_colors_age) + 
+  labs(
+    title = "Influenza Coverage vs Uninsured Rate by Age Group",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)",
+    color = "Age Group",
+    shape = "Age Group"
+  ) +
+  theme_classic()
+```
+
+
+Stratified Analysis by Age Group for Tdap Vaccination
+Tdap&Age
+```{r}
+Tdap_age <- merged_df %>%
+  filter(
+    Vaccine == "Tdap",
+    Dimension.Type == "Age",
+    !is.na(Estimate....),
+    !Estimate.... %in% c("NR*", "N/A", "--", "*")
+  ) %>%
+  mutate(
+    Coverage = as.numeric(str_replace(Estimate...., "%", "")),
+    Year = as.numeric(Survey.Year.Influenza.Season),
+    UninsuredRate = Uninsured / (Insured + Uninsured)
+  )
+unique(Tdap_age$Dimension)
+```
+
+>=18 Years
+
+```{r}
+Tdap_18 <- Tdap_age %>%
+  filter(Dimension == ">=18 Years")
+
+# Plot
+ggplot(Tdap_18, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (>=18 years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data =Tdap_18))
+```
+18-24 Years
+```{r}
+Tdap_1824 <- Tdap_age %>%
+  filter(Dimension == "18-24 Years")
+
+# Plot
+ggplot(Tdap_1824, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "darkgreen", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (18-24 years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data =Tdap_1824))
+```
+25-34 Years
+```{r}
+Tdap_2534 <- Tdap_age %>%
+  filter(Dimension == "25-34 Years")
+
+# Plot
+ggplot(Tdap_2534, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "orange", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (25-34 years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data =Tdap_2534))
+```
+>=35 Years
+
+```{r}
+Tdap_35 <- Tdap_age %>%
+  filter(Dimension == ">=35 Years")
+
+# Plot
+ggplot(Tdap_35, aes(x = UninsuredRate, y = Coverage)) +
+  geom_point(color = "purple", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate (>=35 years)",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)"
+  ) +
+  theme_minimal()
+
+# Summary
+summary(lm(Coverage ~ UninsuredRate, data =Tdap_35))
+```
+
+Merged Tdap Stratified by Age Group
+```{r}
+ggplot(Tdap_age, aes(
+  x = UninsuredRate,
+  y = Coverage,
+  color = Dimension,
+  shape = Dimension
+)) +
+  geom_point(size = 2, alpha = 0.6) + 
+  geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+  scale_color_manual(values = my_colors_age) + 
+  labs(
+    title = "Tdap Coverage vs Uninsured Rate by Age Group",
+    x = "Uninsured Rate",
+    y = "Vaccination Coverage (%)",
+    color = "Age Group",
+    shape = "Age Group"
+  ) +
+  theme_classic()
+```
+

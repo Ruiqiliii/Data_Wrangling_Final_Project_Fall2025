@@ -1,0 +1,427 @@
+---
+title: "Final_Project_GIS_MXIA"
+author: "Mengying Xia"
+date: "2025-10-23"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(sf)
+library(tigris)
+library(tmap)
+library(viridis)
+library(ggplot2)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthdata)
+options(tigris_use_cache = TRUE)
+```
+
+## 1. Data management for merged version dataset
+
+```{r}
+vac <- read.csv("~/Desktop/QBS 181/Wrangle Avengers/MergedVersion.csv")
+colnames(vac) <- c("Vaccine", "Geography_Type", "State_full","Survey_Year", "Adjustment", "Value", "Estimate", "CI", "Sample_Size", "State", "Year", "Insured", "Uninsured", "UrbanicityIndex")
+
+vac <- vac %>%
+  mutate(State = toupper(State)) %>%
+  mutate(
+    across(c(Vaccine, Geography_Type, State_full, Survey_Year, Year, Adjustment, Value, State), as.factor),
+    across(CI, as.character),
+    across(c(Estimate, Sample_Size, Insured, Uninsured, UrbanicityIndex),
+           ~ as.numeric(gsub("[^0-9.]", "", .)))
+  )
+
+# check missing pattern
+dim(vac)
+colSums(is.na(vac))
+summary(vac)
+
+# check age group, missing estimates, and sample size
+age_missing_keys <- vac %>%
+  filter(Adjustment == "Age" & (is.na(Estimate) | is.na(Sample_Size))) %>%
+  distinct(State_full, Vaccine, Year)
+# check those same combinations for Race and Ethnicity
+race_check <- vac %>%
+  filter(Adjustment == "Race and Ethnicity")%>%
+  semi_join(age_missing_keys, by = c("State_full", "Vaccine", "Year")) %>%
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    total = n(),
+    missing_estimate = sum(is.na(Estimate)),
+    missing_sample_size = sum(is.na(Sample_Size)),
+    all_complete = all(!is.na(Estimate) & !is.na(Sample_Size))
+  ) %>%
+  ungroup()
+race_check[race_check$all_complete==TRUE,]
+
+# use age group to recalcute the estimates for year and 
+vac_filtered <- vac %>%
+  filter(Adjustment == "Age") %>%
+  anti_join(age_missing_keys, by = c("State_full", "Vaccine", "Year")) 
+
+# check missingness
+vac_filtered %>%
+  filter(Adjustment == "Age" & (is.na(Estimate) | is.na(Sample_Size))) %>%
+  distinct(State_full, Vaccine, Year)
+
+# check consistency for insured, uninsured, and urbanicity
+vac_filtered %>%
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    n_rows = n(),
+    insured_var = n_distinct(Insured, na.rm = TRUE),
+    uninsured_var = n_distinct(Uninsured, na.rm = TRUE),
+    urbanicity_var = n_distinct(UrbanicityIndex, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  summarise(
+    groups_total = n(),
+    groups_insured_vary = sum(insured_var > 1),
+    groups_uninsured_vary = sum(uninsured_var > 1),
+    groups_urbanicity_vary = sum(urbanicity_var > 1)
+  )
+
+df <- vac_filtered %>% 
+  group_by(State_full, Vaccine, Year) %>%
+  summarise(
+    Weighted_Estimate = sum(Estimate * Sample_Size) / 
+                        (100*sum(Sample_Size)),
+    Total_Sample = sum(Sample_Size),
+    State = first(State),
+    Insured = first(Insured),
+    Uninsured = first(Uninsured),
+    UrbanicityIndex = first(UrbanicityIndex)
+  ) %>%
+  ungroup()
+
+# exclude all missingness
+colSums(is.na(df))
+df <- df %>% filter(complete.cases(.))
+dim(df)
+
+df <- df %>% 
+  mutate(State = toupper(State)) %>% 
+  mutate(insurance_coverage = Insured/(Insured+Uninsured)) 
+
+head(df)
+```
+## 2. Prepare mapping data
+```{r}
+# get U.S. state boundaries (excluding territories) 
+states_sf <- states(cb = TRUE, year = 2023) %>%
+  st_as_sf() %>%
+  filter(!STUSPS %in% c("AS", "GU", "MP", "PR", "VI")) %>%
+  select(STUSPS, NAME, geometry)
+
+# join vaccination + insurance data
+merged_df <- states_sf %>%
+  left_join(df, by = c("STUSPS" = "State"))
+
+# check unmatched states
+unmatched <- merged_df %>% filter(is.na(Vaccine))
+if (nrow(unmatched) > 0) {
+  cat("Warning: Some states did not match:\n")
+  print(unmatched$NAME)
+}
+
+# save as GeoJSON for future use
+st_write(merged_df, "pregnant_vaccination.geojson", driver = "GeoJSON", delete_dsn = TRUE)
+```
+Aim 1.2:  Compare temporal and sociodemographic patterns of maternal influenza and Tdap vaccination coverage from 2013 to 2022 to assess changes in coverage inequities across states and population subgroups, and evaluate whether disparities in vaccine uptake have narrowed over time.
+
+```{r}
+# Trends of Maternal vaccination coverage (2013–2022)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(glue)
+library(tibble) 
+
+# check rows by adjustment 
+vac %>%
+  count(Adjustment, name = "n") %>%
+  arrange(desc(n)) %>%
+  as_tibble() %>%     
+  print(n = Inf)     
+
+
+# build weighted estimates per state–vaccine–year
+# Age > Race
+build_level <- function(v, adj_name) {
+  v %>%
+    filter(Adjustment == adj_name) %>%
+    group_by(State, Vaccine, Year) %>%
+    summarise(
+      Weighted_Estimate = sum(Estimate * Sample_Size, na.rm = TRUE) /
+                          (100 * sum(Sample_Size, na.rm = TRUE)),
+      Total_Sample = sum(Sample_Size, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(source = adj_name)
+}
+
+age1  <- build_level(vac, "Age")
+race1 <- build_level(vac, "Race and Ethnicity")
+
+core <- bind_rows(age1, race1) %>%
+  mutate(priority = match(source, c("Age","Race and Ethnicity"))) %>%
+  arrange(State, Vaccine, Year, priority) %>%
+  group_by(State, Vaccine, Year) %>%
+  slice(1) %>%
+  ungroup()
+
+
+# insurance info for state–year
+ins_cov <- vac %>%
+  group_by(State, Year) %>%
+  summarise(
+    Insured   = first(na.omit(Insured)),
+    Uninsured = first(na.omit(Uninsured)),
+    .groups = "drop"
+  )
+
+df <- core %>%
+  left_join(ins_cov, by = c("State","Year")) %>%
+  filter(!is.na(Insured), !is.na(Uninsured),
+         is.finite(Weighted_Estimate)) %>%
+  mutate(
+    insurance_coverage = Insured / (Insured + Uninsured),
+    Vaccine = as.character(Vaccine),
+    Year    = as.integer(Year)
+  )
+
+stopifnot(nrow(df) > 0)
+
+
+# Trends 2013–2022 and baseline (2013)
+df_trend <- df %>% filter(Year >= 2013, Year <= 2022)
+
+base_ref <- df_trend %>%
+  filter(Year == 2013) %>%
+  transmute(State, base_ins_cover = insurance_coverage) %>%
+  filter(is.finite(base_ins_cover))
+
+
+# quartiles by baseline insurance
+q_ref <- base_ref %>%
+  mutate(
+    q = ntile(base_ins_cover, 4),
+    qlab = factor(q, levels = 1:4,
+                  labels = c("Q1: Lowest insurance","Q2","Q3","Q4: Highest insurance"))
+  )
+
+df_trend_q <- df_trend %>% inner_join(q_ref, by = "State")
+
+
+trend_summ <- df_trend_q %>%
+  group_by(Vaccine, Year, qlab) %>%
+  summarise(mean_cov = mean(Weighted_Estimate, na.rm = TRUE), .groups = "drop")
+
+
+# Plot
+# make sure Year is numeric and finite in the summary table
+trend_summ <- df_trend_q %>%
+  group_by(Vaccine, Year, qlab) %>%
+  summarise(mean_cov = mean(Weighted_Estimate, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Year = as.integer(Year)) %>%
+  filter(is.finite(Year))
+
+# build safe year breaks
+year_breaks <- sort(unique(trend_summ$Year[is.finite(trend_summ$Year)]))
+
+# plot
+p_trend <- ggplot(trend_summ,
+                  aes(x = Year, y = mean_cov, color = qlab, group = qlab)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = label_percent(accuracy = 1), limits = c(0, 1)) +
+  { if (length(year_breaks) > 0) scale_x_continuous(breaks = year_breaks) } +
+  labs(
+    title = "Maternal Vaccination Coverage by Baseline Insurance Quartiles",
+    subtitle = "Baseline = 2013; lines show state-mean coverage",
+    x = NULL, y = "Coverage", color = "Baseline insurance\nquartile"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position = "bottom") +
+  facet_wrap(~ Vaccine, ncol = 1, drop = TRUE)
+
+print(p_trend)
+
+```
+
+```{r}
+# Ensure Year is numeric and finite
+trend_summ <- trend_summ %>%
+  mutate(Year = as.numeric(Year)) %>%
+  filter(is.finite(Year))
+
+# Define y-axis limits
+y_min <- 0.30
+y_max <- 0.90
+
+# Build plot
+p_trend <- ggplot(trend_summ,
+                  aes(x = Year, y = mean_cov, color = qlab, group = qlab)) +
+  geom_line(linewidth = 1.8) +
+  geom_point(size = 3.2) +
+  scale_y_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(y_min, y_max),
+    breaks = seq(y_min, y_max, by = 0.05)
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(trend_summ$Year))  # safer than seq()
+  ) +
+  labs(
+    title = "Maternal Vaccination Coverage by Baseline Insurance Quartiles",
+    subtitle = glue("Y-axis truncated ({percent(y_min)}–{percent(y_max)}); Baseline = 2013"),
+    x = NULL,
+    y = "Coverage",
+    color = "Baseline insurance\nquartile"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 11),
+    plot.title   = element_text(face = "bold", size = 18),
+    plot.subtitle= element_text(size = 12, colour = "grey30"),
+    strip.text   = element_text(face = "bold", size = 14)
+  ) +
+  facet_wrap(~ Vaccine, ncol = 1, drop = TRUE)
+
+print(p_trend)
+
+```
+
+```{r}
+# Bar charts for age and race (2022)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(glue)
+library(tibble)
+
+# build age and race dataset for one vaccine and 2022
+age_race_group <- function(vac, year_pick = 2022, vaccine_pick = "Influenza") {
+  # Map raw Adjustment values to friendly facet labels
+  dict_adj <- tibble::tibble(
+    Adjustment = c("Age","Race and Ethnicity"),
+    group_set  = c("By Age","By Race/Ethnicity")
+  )
+
+  # selected year and vaccine
+  vac_clean <- vac %>%
+    filter(Year == year_pick, Vaccine == vaccine_pick)
+
+  # calculate the overall coverage for vaccine
+  # if Age is missing, back to race
+  overall_try <- function(adj) {
+    vac_clean %>%
+      filter(Adjustment == adj) %>%
+      summarise( ov = sum(Estimate * Sample_Size, na.rm = TRUE) /
+             (100 * sum(Sample_Size, na.rm = TRUE))
+      ) %>%
+      pull(ov)
+  }
+
+  overall <- if (!all(is.na(vac_clean$Estimate))) {
+    if (any(vac_clean$Adjustment == "Age")) {
+      overall_try("Age")
+    } else {
+      overall_try("Race and Ethnicity")
+    }
+  } else NA_real_
+
+  # adjustment
+  # collapse to state level weighted coverage within each subgroup 
+  # compute a national weighted mean across states (weights = state total n)
+  group_list <- list()
+  for (adj in dict_adj$Adjustment) {
+    if (!adj %in% unique(vac_clean$Adjustment)) next
+
+    tmp <- vac_clean %>%
+      filter(Adjustment == adj) %>%
+      group_by(Value, State) %>%
+      summarise(
+        w_est = sum(Estimate * Sample_Size, na.rm = TRUE) /
+                (100 * sum(Sample_Size, na.rm = TRUE)),
+        n_sum = sum(Sample_Size, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      group_by(Value) %>%
+      summarise(
+        cov = weighted.mean(w_est, w = n_sum, na.rm = TRUE),
+        N   = sum(n_sum, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(Adjustment = adj)
+    group_list[[adj]] <- tmp
+  }
+
+  # check data is appear
+  grp_all <- bind_rows(group_list)
+  if (nrow(grp_all) == 0) stop("No subgroup data for this year/vaccine.")
+
+  grp_all <- grp_all %>%
+    left_join(dict_adj, by = "Adjustment") %>%
+    mutate(
+      group_set = factor(group_set, levels = c("By Age","By Race/Ethnicity")),
+      label = Value
+    ) %>%
+    arrange(group_set, label)
+
+  list(overall = overall, tbl = grp_all)
+}
+
+# plot
+plot_group_bar <- function(obj, year_pick, vaccine_pick) {
+  overall_val <- obj$overall
+  dat <- obj$tbl
+
+  ggplot(dat, aes(x = reorder(label, as.numeric(group_set)), y = cov)) +
+    geom_col(aes(fill = group_set), width = 0.7, color = "white") +
+    { if (is.finite(overall_val))
+        geom_hline(yintercept = overall_val, linetype = 2, color = "black") } +
+    geom_text(aes(label = percent(cov, accuracy = 0.1)),
+              vjust = -0.3, size = 3.2, color = "black") +
+    scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+    scale_fill_manual(values = c("By Age" = "forestgreen",
+                                 "By Race/Ethnicity" = "orange"),
+                      guide = "none") +
+    labs(
+      title = glue("{vaccine_pick}: Coverage by Age and Race ({year_pick})"),
+      subtitle = "Dashed line = overall weighted coverage",
+      x = NULL, y = "Coverage"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 30, hjust = 1),
+      strip.text = element_text(face = "bold")
+    )
+}
+
+
+# Figure: Influenza (2022)
+gA <- age_race_group(vac, year_pick = 2022, vaccine_pick = "Influenza")
+p_gA <- plot_group_bar(gA, 2022, "Influenza")
+print(p_gA)
+
+# Figure: Tdap (2022)
+gB <- age_race_group(vac, year_pick = 2022, vaccine_pick = "Tdap")
+p_gB <- plot_group_bar(gB, 2022, "Tdap")
+print(p_gB)
+
+```
+
+
