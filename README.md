@@ -42,14 +42,13 @@
      `tidyverse`, `readr`, `dplyr`, `tidyr`, `janitor`, `ggplot2`,  
      `fixest` (TWFE), `marginaleffects` (marginal effects & CI),  
      `modelsummary`, `broom` (tables),  
-     `sf`, `tigris`, `tmap` (for GIS, optional).
+     `sf`, `tigris`, `tmap` (for GIS).
 
 2. **Run order (minimal path to replicate)**
    - Run **`DataCleaning&Aim2.1.Rmd`** → produces cleaned intermediates and **`vaccination.csv`** (analysis table) and **`DataCleaning-Aim2.1.pdf`**.
    - Run **`Aim 1.2 Code.Rmd`** (if you need Aim 1.2 outputs).
    - Run **`Aim1.1_Final_Project_GIS_MXIA.Rmd`** (if you need maps).
-   - Enter **`Aim2.2&2.3/`** and Knit the Rmd there to generate **TWFE** and **interaction** figures/tables.
-   - Figures/tables are saved to the paths specified in each Rmd (typically a `fig/` or `tables/` directory).
+   - Run **`Aim2_Analysis(after 2.2).Rmd`** and Knit the Rmd there to generate **TWFE** and **interaction** figures/tables.
 
 3. **Inputs & outputs**
    - **Inputs:**  
