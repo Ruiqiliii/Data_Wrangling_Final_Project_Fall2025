@@ -85,7 +85,7 @@
 - **Aim 1.1 (GIS overview / maps)**  
   - Build state polygons with `sf`/`tigris`;  
   - Join vaccination coverage to geometry (latest available year, and/or faceted by year);  
-  - Produce state choropleths for **Flu** and **Tdap** with consistent color scales, legend, and missingness encoding; optional AK/HI insets.  
+  - Produce state choropleths for **Flu** and **Tdap** with consistent color scales, legend, and missingness encoding.  
 - **Aim 1.2 (wrangling code / pipeline)**  
   - Parse raw inputs; clean state codes/names and years; de-duplicate; enforce types;  
   - Compute sample-size–weighted coverage at the **state–year–vaccine** unit;   
