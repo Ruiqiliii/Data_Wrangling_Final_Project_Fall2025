@@ -3,12 +3,12 @@ title: "Aim 2.2 & 2.3 — Urbanicity, Uninsurance, and Maternal Vaccination"
 author: "Ruiqi Li"
 date: "`r format(Sys.Date())`"
 output:
+  pdf_document:
+    toc: true
+    number_sections: true
   html_document:
     toc: true
     toc_depth: 3
-    number_sections: true
-  pdf_document:
-    toc: true
     number_sections: true
 ---
 
@@ -309,7 +309,7 @@ me_table <- function(mod, dat0, title){
   V33 <- V["unins_z:nchs13_z","unins_z:nchs13_z"]
   V13 <- V["unins_z","unins_z:nchs13_z"]
 
-  nchs_seq <- 1:6
+  nchs_seq <- 1:5
   mu  <- mean(dat0$nchs_2013, na.rm=TRUE)
   sdv <- sd(dat0$nchs_2013,   na.rm=TRUE)
   z   <- (nchs_seq - mu)/sdv
@@ -332,7 +332,7 @@ me_all  <- dplyr::bind_rows(me_flu, me_tdap)
 ggplot(me_all, aes(x = NCHS, y = marginal_effect, color = model)) +
   geom_line() + geom_point() +
   geom_ribbon(aes(ymin = lo95, ymax = hi95, fill = model), alpha = .15, color = NA) +
-  labs(x = "NCHS (1 = urban → 6 = rural)",
+  labs(x = "NCHS (1 = urban → 5 = rural)",
        y = "Marginal effect of Uninsurance on coverage (pp per 1 SD)",
        title = "Aim 2.3 — Interaction: Uninsurance × NCHS (marginal effects)") +
   theme_minimal()
@@ -389,11 +389,11 @@ panel_plot <- vacc_wide %>%
   )
 
 # plot
-lab_nchs <- function(x) factor(x, levels = 1:6, labels = paste0("NCHS ", 1:6))
+lab_nchs <- function(x) factor(x, levels = 1:5, labels = paste0("NCHS ", 1:5))
 
 panel_plot_grp <- panel_plot %>%
   dplyr::mutate(
-    # Map continuous indices to 1..6, and truncate out-of-bounds indices to [1,6]
+    # Map continuous indices to 1..5, and truncate out-of-bounds indices to [1,5]
     nchs_grp = dplyr::case_when(
       is.na(nchs_base) ~ NA_integer_,
       TRUE ~ pmin(6L, pmax(1L, as.integer(round(nchs_base))))
@@ -436,13 +436,13 @@ ggplot(tdap_plot_df, aes(uninsured_rate, vacc_tdap_pct, color = nchs_lab)) +
 ```
 
 ## 6B) Prediction line (TWFE model) × NCHS facet
-Use the estimated model to draw "predicted coverage curves changing with the uninsured rate under different NCHS (1..6)"; and mutual confirmation with 6A's "observation + OLS"
+Use the estimated model to draw "predicted coverage curves changing with the uninsured rate under different NCHS (1..5)"; and mutual confirmation with 6A's "observation + OLS"
 
 ```{r}
 # Generate prediction grid
 mk_grid <- function(dat){
   g <- expand.grid(
-    nchs_2013 = 1:6,
+    nchs_2013 = 1:5,
     uninsured_rate = seq(min(dat$uninsured_rate, na.rm=TRUE),
                          max(dat$uninsured_rate, na.rm=TRUE), length.out = 50),
     year  = median(dat$year, na.rm=TRUE),
@@ -488,7 +488,7 @@ Suitable for "global sense" display interaction: horizontal axis uninsured rate,
 
 mk_heat <- function(dat, mod){
   g <- expand.grid(
-    nchs_2013 = 1:6,
+    nchs_2013 = 1:5,
     uninsured_rate = seq(min(dat$uninsured_rate, na.rm=TRUE),
                          max(dat$uninsured_rate, na.rm=TRUE), length.out = 80),
     year  = median(dat$year, na.rm=TRUE),
@@ -517,7 +517,7 @@ bin_and_avg <- function(g){
   breaks <- seq(rng[1], rng[2], length.out = nbins + 1)
   g %>%
     dplyr::mutate(
-      nchs_bin  = factor(nchs_2013, levels = 1:6, labels = paste0("NCHS ", 1:6)),
+      nchs_bin  = factor(nchs_2013, levels = 1:5, labels = paste0("NCHS ", 1:5)),
       unins_bin = cut(uninsured_rate, breaks = breaks, include.lowest = TRUE)
     ) %>%
     dplyr::group_by(nchs_bin, unins_bin) %>%
@@ -533,7 +533,7 @@ ggplot(heat_flu_b, aes(x = nchs_bin, y = unins_bin, fill = pred)) +
   geom_tile(color = "white", size = 0.6) +  # Add white grid lines
   scale_fill_gradient(low = "#f7fbff", high = "#08306b",
                       name = "Predicted coverage (%)") +
-  labs(x="NCHS (1=urban → 6=rural)", y="Uninsurance (binned)",
+  labs(x="NCHS (1=urban → 5=rural)", y="Uninsurance (binned)",
        title="Predicted Flu coverage heatmap") +
   coord_equal() +
   scale_fill_viridis_c(option = "magma", direction = -1, name = "Predicted (%)") +
@@ -546,7 +546,7 @@ ggplot(heat_tdap_b, aes(x = nchs_bin, y = unins_bin, fill = pred)) +
   geom_tile(color = "white", size = 0.6) +
   scale_fill_gradient(low = "#f7fbff", high = "#08306b",
                       name = "Predicted coverage (%)") +
-  labs(x="NCHS (1=urban → 6=rural)", y="Uninsurance (binned)",
+  labs(x="NCHS (1=urban → 5=rural)", y="Uninsurance (binned)",
        title="Predicted Tdap coverage heatmap") +
   coord_equal() +
   scale_fill_viridis_c(option = "magma", direction = -1, name = "Predicted (%)") +
@@ -565,7 +565,7 @@ ggplot(me_all, aes(x = NCHS, y = marginal_effect, color = model)) +
   geom_errorbar(aes(ymin = lo95, ymax = hi95), width = .15,
                 position = position_dodge(width=.2)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(x = "NCHS (1=urban → 6=rural)",
+  labs(x = "NCHS (1=urban → 5=rural)",
        y = "Marginal effect of Uninsurance (pp per 1 SD)",
        title = "Aim 2.3 — Marginal effects with 95% CI") +
   theme_minimal()
