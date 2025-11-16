@@ -6,7 +6,7 @@
 - **Team name:** Wrangle Avengers  
 - **Members:** Mengying Xia, Ruining Zhou, Xinyi Yu, Ruiqi Li  
 - **Course:** QBS 181 / Data Wrangling (Fall 2025)  
-- **Instructor:** Carly Bobak
+- **Instructor/TA:** Carly Bobak, Ashlee Korsberg
 
 ---
 
