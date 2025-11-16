@@ -6,7 +6,7 @@
 - **Team name:** Wrangle Avengers  
 - **Members:** Mengying Xia, Ruining Zhou, Xinyi Yu, Ruiqi Li  
 - **Course:** QBS 181 / Data Wrangling (Fall 2025)  
-- **Instructor:** Carly Bobak
+- **Instructor/TA:** Carly Bobak, Ashlee Korsberg
 
 ---
 
@@ -14,7 +14,8 @@
 
 ```
 .
-├── Aim 1.2 Code.Rmd                      # Code for Aim 1.2
+├── Aim 1.2 Code .Rmd                      # Code for Aim 1.2
+├── Aim-1.2-Code-.pdf                      # Knit output of Aim 1.2
 ├── Aim1.1_Final_Project_GIS_MXIA.Rmd     # GIS overview (choropleths/maps)
 ├── Aim2_Analysis(after 2.2).Rmd          # Code for Aim 2.2–2.3 (TWFE, interactions)
 ├── Aim2_Analysis-after-2.2.pdf           # Knit output of Aim 2.2–2.3 
