@@ -22,10 +22,12 @@
 ├── Data Approval.pdf                      # Data approval (project requirement)
 ├── DataCleaning&Aim2.1.Rmd                # Data cleaning + Aim 2.1 raw analyses
 ├── DataCleaning-Aim2.1.pdf                # Knit output of the above
+├── Data_Wrangling_Final_Project.pdf       # **Final Paper (Full Report)**
 ├── MergeClarification.csv                 # Merge keys / sanity checks (doc table)
 ├── MergedVersion.csv                      # Processed + merged analytic table (state–year)
 ├── RawData.zip                            # Original raw files (zipped for size)
 ├── Vaccination_Coverage_among_Pregnant_W....csv  # Processed vaccination input
+├── Wrangle Avengers PPT.pdf               # **Final Presentation Slides**
 ├── insurance_summary_by_state_2012_2022.csv      # Processed insurance input
 ├── state_urban_index_2013_2023.csv               # Processed NCHS (state-level)
 ├── vaccination.csv                        # Final processed/merged data (used by models)
@@ -99,6 +101,16 @@
   - Weights: `n_vacc`; SEs clustered by `state`.  
   - Visuals: predicted lines by NCHS; **marginal effects** across NCHS (shaded band = **95% CI**).
 
+---
+
+## Final deliverables
+
+- **Final Paper (PDF):** [Data_Wrangling_Final_Project.pdf](Data_Wrangling_Final_Project.pdf)  
+  – Full report integrating all Aims, results, and interpretation.
+
+- **Final Presentation (PDF):** [Wrangle Avengers PPT.pdf](Wrangle%20Avengers%20PPT.pdf)  
+  – Slide deck summarizing aims, visualizations, and main findings.
+  
 ---
 
 ## Data sources
